@@ -7,3 +7,6 @@
 pipecat-ai[runner,webrtc,silero,elevenlabs,openai]>=1.4.0,<2
 # Pipecat Flows: node-graph conversations (used by flow_agent.py).
 pipecat-ai-flows>=1.3.0,<2
+# Exact token counts for the context benchmark (backend/evals/benchmark_context.py).
+# Analysis only — the voice agent does not import it.
+tiktoken>=0.7
