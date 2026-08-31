@@ -6,7 +6,7 @@
 # definition (JSON) via AgentBuilder and runs it. Swapping the agent is a data
 # change (edit/replace the JSON), not a code change.
 #
-#   scheduler_flow.json  ->  AgentBuilder  ->  Pipecat Flows graph  ->  FlowManager
+#   data/agents/*.json  ->  AgentBuilder  ->  Pipecat Flows graph  ->  FlowManager
 #
 # The catalog never enters the prompt. It is reachable only through the tools in
 # tools/, which are bound to the graph here via a per-call SchedulingContext.
@@ -49,7 +49,8 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 
 # The agent this bot runs. Point this at any agent JSON (the Phase 2 Copilot
 # would generate one and drop it here).
-AGENT_FLOW = Path(__file__).parent / "scheduler_flow.json"
+AGENTS_DIR = Path(__file__).parent / "data" / "agents"
+AGENT_FLOW = AGENTS_DIR / "scheduler_flow.json"
 
 # Catalog and retrieval index are process-wide: loading them per call would add
 # startup latency to every conversation for data that never changes mid-session.
@@ -112,7 +113,14 @@ async def run_bot(
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
-        idle_timeout_secs=runner_args.pipeline_idle_timeout_secs,
+        # Overridable so a debugger can sit on a breakpoint: the pipeline
+        # otherwise cancels itself after 300s idle, which a single paused
+        # breakpoint blows through. See .vscode/launch.json.
+        idle_timeout_secs=int(
+            os.environ.get(
+                "PIPELINE_IDLE_TIMEOUT_SECS", runner_args.pipeline_idle_timeout_secs
+            )
+        ),
     )
 
     flow_manager = FlowManager(
@@ -140,14 +148,15 @@ async def run_bot(
 async def bot(runner_args: RunnerArguments):
     """Entry point invoked by the Pipecat dev runner (and Pipecat Cloud).
 
-    Called once per connection, so the agent JSON is re-read on every call:
-    editing the graph in the builder UI and reconnecting is all it takes to run
-    the new version. Bookings are per-call; the catalog is shared.
+    Called once per connection, so both the choice of agent and the agent JSON
+    itself are re-read on every call: editing a graph in the builder UI, or
+    picking a different agent, takes effect on the next connection with no
+    restart. Bookings are per-call; the catalog is shared.
     """
     transport = await create_transport(runner_args, transport_params)
     tool_context = SchedulingContext(catalog=CATALOG, index=SPECIALTY_INDEX)
     builder = AgentBuilder.from_json(
-        AGENT_FLOW, tool_context=tool_context, template_values=TEMPLATE_VALUES
+        api.live_agent_path(), tool_context=tool_context, template_values=TEMPLATE_VALUES
     )
     await run_bot(transport, runner_args, builder)
 

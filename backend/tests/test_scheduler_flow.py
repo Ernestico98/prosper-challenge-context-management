@@ -16,7 +16,7 @@ from agent_builder import AgentBuilder
 from tools import names as tool_names
 from tools.context import SchedulingContext
 
-FLOW_PATH = Path(__file__).parent.parent / "scheduler_flow.json"
+FLOW_PATH = Path(__file__).parent.parent / "data" / "agents" / "scheduler_flow.json"
 
 
 def placeholders(text: str) -> set:

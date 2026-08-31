@@ -33,7 +33,7 @@ from evals.harness import HeadlessFlow                     # noqa: E402
 from tools.context import SchedulingContext                # noqa: E402
 
 SCENARIOS = Path(__file__).parent / "scenarios.json"
-FLOW = Path(__file__).parent.parent / "scheduler_flow.json"
+FLOW = Path(__file__).parent.parent / "data" / "agents" / "scheduler_flow.json"
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 

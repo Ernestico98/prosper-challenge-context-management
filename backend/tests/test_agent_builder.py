@@ -195,7 +195,7 @@ class TestExampleFlowStillCompiles(unittest.TestCase):
         are additive."""
         from pathlib import Path
 
-        example = Path(__file__).parent.parent / "example_flow.json"
+        example = Path(__file__).parent.parent / "data" / "agents" / "example_flow.json"
         builder = AgentBuilder.from_json(example)
         node = builder.build_initial_node()
         self.assertTrue(node["functions"])
