@@ -35,7 +35,8 @@ The builder, the catalog browser, the test call and the API are all served from
 
 | Target | What it does |
 | --- | --- |
-| `make test` | 127 unit tests. No API keys, no network, ~0.05s. |
+| `make test` | 146 unit tests. No API keys, no network, ~0.1s. |
+| `make test-ui` | 17 graph-operation tests (rename and delete cascades). Needs Node. |
 | `make benchmark` | Token cost against the naive full-catalog prompt. |
 | `make evals ARGS=--dry-run` | List the 16 accuracy scenarios; drop `ARGS` to run them (makes OpenAI calls). |
 | `make index` | Precompute specialty embeddings (one batched embedding call). Optional — retrieval falls back to its lexical channel. |
@@ -47,12 +48,12 @@ The builder, the catalog browser, the test call and the API are all served from
 | `backend/catalog/` | The domain. `store.py` records + indices, `policies.py` the 6 booking rules, `query.py` the single `find_bookable` solver, `index.py` hybrid retrieval. **No LLM anywhere** — deterministic and unit-tested. |
 | `backend/tools/` | Thin adapters between the LLM and the domain: budget context, shape for speech, recover from bad input. `registry.py` maps tool names in JSON to handlers. |
 | `backend/agent_builder/` | `schema.py` the declarative `AgentConfig`/`Node`/`Edge` contract, extended with node-level `tools` and `context_strategy`; `builder.py` compiles it into a Pipecat Flows graph. |
-| `backend/scheduler_flow.json` | The scheduling agent, as data. `example_flow.json` remains as the minimal format example. |
+| `backend/data/agents/` | The agents, as data. `scheduler_flow.json` is the scheduling agent; `example_flow.json` remains as the minimal format example. The builder UI reads and writes this directory. |
 | `backend/bot.py` | The voice pipeline. Loads an agent JSON and runs it; no graph logic. |
 | `backend/api.py` | Builder API + live metrics websocket, mounted on the runner's own FastAPI app. |
 | `backend/evals/` | The headless flow harness, 16 accuracy scenarios, and the context benchmark. |
 | `backend/data/` | `catalog.json` (the provided clinic catalog) and `specialty_aliases.json` (curated bilingual symptom vocabulary). |
-| `frontend/` | React + Vite + React Flow: node graph editor, catalog browser, test call with a live context-cost panel. |
+| `frontend/` | React + Vite + React Flow. Create, wire and delete agents; edit nodes, edges and the slots they collect; browse the catalog; place a test call with a live context-cost panel. `graphOps.js` holds the graph edits as pure functions, because renaming a node has to cascade through every edge that targets it. |
 
-To run a different agent, point `AGENT_FLOW` in `bot.py` at another JSON file. The runner
-re-reads it on every connection, so saving in the UI and reconnecting is enough — no restart.
+Pick which agent the test call runs from the builder UI. The runner re-reads the agent JSON on
+every connection, so saving and reconnecting is enough — no restart.

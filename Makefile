@@ -3,7 +3,7 @@
 VENV := backend/.venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: help install run test index benchmark evals ui clean
+.PHONY: help install run test test-ui index benchmark evals ui clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -22,6 +22,9 @@ run: ## Run the agent + builder UI (http://localhost:7860/builder)
 
 test: ## Run the domain test suite (no API keys, no network)
 	$(PYTHON) -m unittest discover -s backend/tests -t backend
+
+test-ui: ## Run the graph-operation tests (Node's built-in runner)
+	cd frontend && node --test src/
 
 index: ## Precompute specialty embeddings (one batched embedding call)
 	$(PYTHON) backend/scripts/build_specialty_vectors.py
