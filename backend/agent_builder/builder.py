@@ -86,6 +86,19 @@ class AgentBuilder:
         names = set(self._nodes_by_name)
         if not names:
             raise ValueError("Agent has no nodes.")
+        # Names are identity here: edges target them and initial_node picks one.
+        # A duplicate does not raise on its own -- the dict above quietly keeps
+        # the last one and the other node becomes unreachable -- so it has to be
+        # caught explicitly. Harmless while agents were hand-written; reachable
+        # the moment the builder UI can add nodes.
+        if len(names) != len(self.config.nodes):
+            seen, duplicates = set(), set()
+            for node in self.config.nodes:
+                (duplicates if node.name in seen else seen).add(node.name)
+            raise ValueError(
+                f"Duplicate node name(s): {', '.join(sorted(duplicates))}. "
+                "Node names must be unique."
+            )
         if self.config.initial_node not in names:
             raise ValueError(
                 f"initial_node '{self.config.initial_node}' is not a defined node."

@@ -14,6 +14,7 @@
 #
 
 import json
+import re
 from pathlib import Path
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
@@ -23,6 +24,7 @@ from loguru import logger
 from pipecat.runner.run import app
 
 from agent_builder import AgentBuilder
+from agent_builder.schema import DEFAULT_MODEL, DEFAULT_VOICE_ID
 from catalog import (
     Catalog,
     bookable_specialties,
@@ -33,25 +35,57 @@ from observability import BROADCASTER
 from tools import describe_all
 
 BACKEND_DIR = Path(__file__).parent
+# Agents are data, so they live with the rest of the data. The UI names files
+# after the agent, so this directory is discovered wholesale rather than by a
+# filename pattern that only ever matched the two that shipped.
+AGENTS_DIR = BACKEND_DIR / "data" / "agents"
+_VALID_AGENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 FRONTEND_DIST = BACKEND_DIR.parent / "frontend" / "dist"
 
 CATALOG = Catalog.load()
+
+DEFAULT_AGENT = "scheduler_flow"
+# Which agent a test call runs. Held in memory rather than in a state file: the
+# runner re-reads the JSON on every connection, so switching takes effect on the
+# next call, and a restart sensibly returns to the shipped agent.
+_live_agent = DEFAULT_AGENT
+
+
+def live_agent_path() -> Path:
+    """The agent bot.py should run. Falls back if the live one was deleted."""
+    path = AGENTS_DIR / f"{_live_agent}.json"
+    return path if path.exists() else AGENTS_DIR / f"{DEFAULT_AGENT}.json"
 
 
 # ---- agents ----------------------------------------------------------------
 
 
 def _agent_path(name: str) -> Path:
-    # Anything that is not a bare filename is a path traversal attempt.
-    if Path(name).name != name:
+    """Resolve an agent id to its file, refusing anything that is not one.
+
+    Two checks rather than one. The shape check is what users hit: the builder
+    lets people name agents, and a name with a slash or a space is a mistake
+    worth catching with a clear message. The resolve check is defence in depth,
+    because reasoning about name shapes is easy to get subtly wrong -- an
+    earlier version tested `Path(name).name != name`, which lets a bare ".."
+    through untouched.
+    """
+    if not _VALID_AGENT_NAME.match(name or ""):
+        raise HTTPException(
+            400,
+            "Agent names must start with a letter or digit and contain only "
+            "letters, digits, dots, dashes and underscores.",
+        )
+    candidate = (AGENTS_DIR / f"{name}.json").resolve()
+    if candidate.parent != AGENTS_DIR.resolve():
         raise HTTPException(400, "Invalid agent name.")
-    return BACKEND_DIR / f"{name}.json"
+    return candidate
 
 
 @app.get("/api/agents")
 async def list_agents():
     agents = []
-    for path in sorted(BACKEND_DIR.glob("*_flow.json")):
+    for path in sorted(AGENTS_DIR.glob("*.json")):
         try:
             data = json.loads(path.read_text())
         except json.JSONDecodeError:
@@ -61,10 +95,55 @@ async def list_agents():
                 "id": path.stem,
                 "name": data.get("name", path.stem),
                 "nodes": len(data.get("nodes", [])),
-                "active": path.name == "scheduler_flow.json",
+                "active": path.stem == _live_agent,
             }
         )
     return {"agents": agents}
+
+
+@app.get("/api/agents/template")
+async def agent_template():
+    """A minimal agent that already runs.
+
+    Two wired nodes rather than one, so a freshly created agent greets, hangs up
+    and can be called immediately — a lone node would compile but trap the
+    caller in a step with no way out.
+    """
+    return {
+        "name": "New agent",
+        "voice_id": DEFAULT_VOICE_ID,
+        "model": DEFAULT_MODEL,
+        "persona": "You are a warm, concise assistant. Your words are spoken aloud, so "
+        "avoid emojis, lists or anything unreadable. Keep replies to one or two short "
+        "sentences.",
+        "initial_node": "greeting",
+        "nodes": [
+            {
+                "name": "greeting",
+                "task_messages": [
+                    {
+                        "role": "developer",
+                        "content": "Greet the caller and ask how you can help. When they "
+                        "are done, call finish.",
+                    }
+                ],
+                "edges": [
+                    {
+                        "function": "finish",
+                        "description": "The caller has nothing further.",
+                        "target": "farewell",
+                    }
+                ],
+            },
+            {
+                "name": "farewell",
+                "task_messages": [
+                    {"role": "developer", "content": "Thank the caller and say goodbye."}
+                ],
+                "end": True,
+            },
+        ],
+    }
 
 
 @app.get("/api/agents/{name}")
@@ -91,6 +170,42 @@ async def save_agent(name: str, agent: dict):
     path.write_text(json.dumps(agent, ensure_ascii=False, indent=2) + "\n")
     logger.info(f"Saved agent '{name}' ({len(agent.get('nodes', []))} nodes)")
     return {"status": "saved", "id": name}
+
+
+@app.post("/api/agents/{name}")
+async def create_agent(name: str, agent: dict):
+    """Create a new agent. Distinct from PUT so an existing one is never
+    overwritten by a mistyped name."""
+    path = _agent_path(name)
+    if path.exists():
+        return JSONResponse({"error": f"An agent named {name!r} already exists."}, status_code=409)
+    return await save_agent(name, agent)
+
+
+@app.delete("/api/agents/{name}")
+async def delete_agent(name: str):
+    path = _agent_path(name)
+    if not path.exists():
+        raise HTTPException(404, f"No agent named {name!r}.")
+    if name == _live_agent:
+        return JSONResponse(
+            {"error": "That agent is live. Make another one live before deleting it."},
+            status_code=409,
+        )
+    path.unlink()
+    logger.info(f"Deleted agent '{name}'")
+    return {"status": "deleted", "id": name}
+
+
+@app.post("/api/agents/{name}/activate")
+async def activate_agent(name: str):
+    """Choose which agent the test call runs. Live on the next connection."""
+    global _live_agent
+    if not _agent_path(name).exists():
+        raise HTTPException(404, f"No agent named {name!r}.")
+    _live_agent = name
+    logger.info(f"Agent '{name}' is now live; reconnect the test call to run it")
+    return {"status": "live", "id": name}
 
 
 @app.get("/api/tools")
