@@ -20,3 +20,8 @@ export const catalogSummary = () => request("/api/catalog/summary");
 export const catalogLocations = () => request("/api/catalog/locations");
 export const catalogProviders = () => request("/api/catalog/providers");
 export const catalogAppointmentTypes = () => request("/api/catalog/appointment-types");
+export const agentTemplate = () => request("/api/agents/template");
+export const createAgent = (id, agent) =>
+  request(`/api/agents/${id}`, { method: "POST", body: JSON.stringify(agent) });
+export const deleteAgent = (id) => request(`/api/agents/${id}`, { method: "DELETE" });
+export const activateAgent = (id) => request(`/api/agents/${id}/activate`, { method: "POST" });

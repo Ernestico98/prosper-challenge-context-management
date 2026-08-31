@@ -70,7 +70,7 @@ main { flex: 1; overflow: hidden; }
 .graph-layout { display: grid; grid-template-columns: 1fr 380px; height: 100%; }
 .canvas { height: 100%; background: var(--bg); position: relative; }
 
-.canvas-toolbar { position: absolute; top: 10px; right: 12px; z-index: 5; }
+.canvas-toolbar { position: absolute; top: 10px; right: 12px; z-index: 5; display: flex; gap: 8px; }
 .ghost { background: var(--panel); border-color: var(--line); color: var(--muted); font-size: 12px; }
 .ghost:hover { color: var(--text); border-color: #4a5364; }
 
@@ -93,7 +93,16 @@ main { flex: 1; overflow: hidden; }
 .react-flow__edge-text { fill: #d3dae6; font-size: 10px; }
 .react-flow__edge-textbg { fill: var(--panel-2); stroke: #3b4354; }
 
-.react-flow__handle { width: 7px; height: 7px; background: #7d8aa3; border: none; }
+/* Handles are what you grab to draw an edge, so they need to be findable and
+   hittable. 7px was neither. */
+.react-flow__handle {
+  width: 10px;
+  height: 10px;
+  background: #7d8aa3;
+  border: 2px solid var(--panel);
+}
+.react-flow__handle:hover { background: var(--accent); }
+.react-flow__node.node:hover .react-flow__handle { background: var(--accent); }
 
 .react-flow__controls-button {
   background: var(--panel-2);
@@ -210,3 +219,111 @@ td.flag { color: var(--warn); }
 .trace code { color: var(--accent); margin-right: 6px; }
 .trace code.reset { color: var(--warn); }
 .muted { color: var(--muted); }
+
+/* ---- creating and managing agents ---- */
+
+.live-badge { color: var(--ok); border-color: var(--ok); padding: 3px 8px; }
+
+.new-agent-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.new-agent-bar label { margin: 0; color: var(--muted); font-size: 12px; }
+.new-agent-bar input { display: block; margin-top: 4px; width: 240px; }
+.new-agent-bar .hint { margin: 0 0 4px; }
+
+.agent-title { color: var(--accent); }
+.two-up { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+button.danger { width: 100%; border-color: var(--danger); color: var(--danger); background: transparent; }
+button.danger:hover:not(:disabled) { background: var(--danger); color: #1a0d0d; }
+.danger-link { background: none; border: none; color: var(--muted); padding: 2px 6px; }
+.danger-link:hover { color: var(--danger); }
+.tiny { font-size: 11px; padding: 2px 7px; }
+
+input.invalid { border-color: var(--danger); }
+.node-flags { display: flex; gap: 16px; margin-bottom: 14px; }
+.node-flags .check { margin: 0 !important; }
+
+/* ---- warnings: shown, never blocking ---- */
+
+.canvas-warnings {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--warn);
+  font-size: 12px;
+  max-width: 48%;
+}
+.flow-node-warning { margin-top: 6px; color: var(--warn); font-size: 10px; line-height: 1.35; }
+
+/* ---- naming a freshly drawn edge ---- */
+
+.edge-form {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  width: 380px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.edge-form h3 { margin: 0 0 14px; font-size: 13px; font-weight: 500; }
+.edge-form code { color: var(--accent); }
+.edge-form label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 12px; }
+.edge-form input { width: 100%; margin-top: 5px; }
+.edge-form-actions { display: flex; gap: 8px; }
+.edge-form-actions .primary { flex: 1; }
+
+/* ---- edges and their slots ---- */
+
+.edge-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: var(--bg);
+}
+.edge-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.edge-fn {
+  flex: 1;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+.edge-card label { margin-bottom: 8px !important; }
+.edge-card input, .edge-card select { width: 100%; font-size: 12px; }
+
+.slots { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.slots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.slot-row {
+  display: grid;
+  grid-template-columns: 1fr 84px auto auto;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.slot-name { font-family: ui-monospace, monospace; font-size: 11px; }
+.slot-description { grid-column: 1 / -1; font-size: 11px; }
+.check.tiny { gap: 4px; font-size: 11px; color: var(--muted); }

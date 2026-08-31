@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from "react";
  * model call, which tools ran, and where the context was reset — live, next to
  * the conversation producing it.
  */
-export default function TestCall({ agent }) {
+export default function TestCall({ agent, live }) {
   const [events, setEvents] = useState([]);
   const [connected, setConnected] = useState(false);
   const socket = useRef(null);
@@ -61,9 +61,17 @@ export default function TestCall({ agent }) {
           <span className={connected ? "dot live" : "dot"} title={connected ? "live" : "offline"} />
         </h2>
         <p className="hint">
-          Running <strong>{agent?.name || "—"}</strong>. Every model call on this call is
-          measured; nothing here is estimated.
+          Running <strong>{live?.name || "—"}</strong>. Every model call is measured;
+          nothing here is estimated.
         </p>
+        {live && agent && live.name !== agent.name && (
+          // Easy trap now that agents can be switched: you edit one and ring
+          // another, then wonder why your change did nothing.
+          <p className="hint warn">
+            ⚠ You have <strong>{agent.name}</strong> open in the editor, but this call runs{" "}
+            <strong>{live.name}</strong>. Set it live to hear your edits.
+          </p>
+        )}
 
         <div className="metric-grid">
           <Metric value={totals.prompt.toLocaleString()} label="prompt tokens" />
