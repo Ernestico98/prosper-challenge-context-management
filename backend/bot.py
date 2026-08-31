@@ -6,7 +6,10 @@
 # definition (JSON) via AgentBuilder and runs it. Swapping the agent is a data
 # change (edit/replace the JSON), not a code change.
 #
-#   example_flow.json  ->  AgentBuilder  ->  Pipecat Flows graph  ->  FlowManager
+#   scheduler_flow.json  ->  AgentBuilder  ->  Pipecat Flows graph  ->  FlowManager
+#
+# The catalog never enters the prompt. It is reachable only through the tools in
+# tools/, which are bound to the graph here via a per-call SchedulingContext.
 #
 # Run:  python bot.py   then open http://localhost:7860/client
 #
@@ -34,7 +37,11 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
 from pipecat_flows import FlowManager
 
+import api  # noqa: F401  (registers the builder UI routes on the runner's app)
 from agent_builder import AgentBuilder
+from catalog import Catalog, bookable_specialties, build_index
+from observability import MetricsTap
+from tools.context import SchedulingContext
 
 # Load .env next to this file, so the bot runs the same from the repo root or backend/.
 load_dotenv(Path(__file__).parent / ".env", override=True)
@@ -42,7 +49,26 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 
 # The agent this bot runs. Point this at any agent JSON (the Phase 2 Copilot
 # would generate one and drop it here).
-AGENT_FLOW = Path(__file__).parent / "example_flow.json"
+AGENT_FLOW = Path(__file__).parent / "scheduler_flow.json"
+
+# Catalog and retrieval index are process-wide: loading them per call would add
+# startup latency to every conversation for data that never changes mid-session.
+CATALOG = Catalog.load()
+SPECIALTY_INDEX = build_index(CATALOG)
+
+# Values an agent's task_messages may interpolate. `{specialties}` is the
+# small-catalog escape hatch: injecting the list costs ~65 tokens but no round
+# trip, which beats retrieval while the list stays short. The shipped scheduler
+# does not use it — it retrieves instead, which is what survives a catalog ten
+# times this size. See solution.md.
+TEMPLATE_VALUES = {
+    "specialties": ", ".join(bookable_specialties(CATALOG)),
+    "clinic_name": "Prosper Clinic",
+    # Default for a slot the conversation may never fill. Without it the prompt
+    # would show the caller-facing model a literal "{provider_language}".
+    "provider_preference": "nobody in particular",
+    "location_preference": "no site in particular",
+}
 
 
 transport_params = {
@@ -75,6 +101,8 @@ async def run_bot(
             stt,
             context_aggregator.user(),
             llm,
+            # Observes token usage on its way past; never alters or delays it.
+            MetricsTap(),
             tts,
             transport.output(),
             context_aggregator.assistant(),
@@ -110,9 +138,17 @@ async def run_bot(
 
 
 async def bot(runner_args: RunnerArguments):
-    """Entry point invoked by the Pipecat dev runner (and Pipecat Cloud)."""
+    """Entry point invoked by the Pipecat dev runner (and Pipecat Cloud).
+
+    Called once per connection, so the agent JSON is re-read on every call:
+    editing the graph in the builder UI and reconnecting is all it takes to run
+    the new version. Bookings are per-call; the catalog is shared.
+    """
     transport = await create_transport(runner_args, transport_params)
-    builder = AgentBuilder.from_json(AGENT_FLOW)
+    tool_context = SchedulingContext(catalog=CATALOG, index=SPECIALTY_INDEX)
+    builder = AgentBuilder.from_json(
+        AGENT_FLOW, tool_context=tool_context, template_values=TEMPLATE_VALUES
+    )
     await run_bot(transport, runner_args, builder)
 
 
