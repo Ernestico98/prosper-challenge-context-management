@@ -1,0 +1,280 @@
+{
+  "_about": [
+    "Accuracy scenarios for the scheduling agent.",
+    "",
+    "Each one is a case the catalog was deliberately built to break: near-duplicate",
+    "appointment types, duplicated provider names, capability-gated services, providers",
+    "at several sites, new-patient and referral rules, and specialties the clinic",
+    "advertises but has nobody to staff.",
+    "",
+    "The caller's lines are scripted and the agent drives the same compiled graph the",
+    "voice pipeline runs. Assertions are on the OUTCOME -- what got booked, and whether",
+    "it was legal -- not on the wording, which is not the thing under test."
+  ],
+  "scenarios": [
+    {
+      "id": "knee_mri_with_referral",
+      "why": "Symptom to specialty is world knowledge; the referral and the imaging gate are policy.",
+      "script": [
+        "Hola, llevo semanas con dolor en la rodilla y mi traumatologo me mando una resonancia.",
+        "Me llamo Ana Ruiz, y ya he venido antes.",
+        "Si, tengo el volante de la derivacion.",
+        "Lo que sea mas pronto me viene bien.",
+        "Perfecto, esa me va bien."
+      ],
+      "expect": {
+        "booked": true,
+        "appointment_type_in": [
+          "appt_065"
+        ],
+        "location_capability": "imaging",
+        "tools_used": [
+          "find_specialties",
+          "find_appointments",
+          "book_appointment"
+        ]
+      }
+    },
+    {
+      "id": "new_patient_checkup",
+      "why": "New patients may only book new-patient types, and only with providers who accept them.",
+      "script": [
+        "Hi, I have never been to this clinic before and I would like a general check-up.",
+        "My name is Marcus Webb.",
+        "Whatever is soonest, thanks.",
+        "That works."
+      ],
+      "expect": {
+        "booked": true,
+        "new_patient_legal": true
+      }
+    },
+    {
+      "id": "ambiguous_provider_name",
+      "why": "Three provider names are duplicated. A name is not a key, so the agent must ask.",
+      "script": [
+        "Buenos dias, queria pedir cita con la doctora Maria Garcia.",
+        "Soy Elena Ortiz, ya soy paciente.",
+        "La pediatra, es para mi hijo.",
+        "Un control del nino, si.",
+        "Cualquiera de las dos me sirve."
+      ],
+      "expect": {
+        "booked": true,
+        "provider_name_contains": "Maria Garcia",
+        "specialty_in": [
+          "Pediatrics"
+        ]
+      }
+    },
+    {
+      "id": "multi_site_provider_gated_service",
+      "why": "Dr. David Chen practises at four sites; his echocardiogram is only bookable where there is imaging.",
+      "script": [
+        "Hola, necesito un ecocardiograma con el doctor David Chen.",
+        "Soy Ramon Ferrer, ya soy paciente suyo.",
+        "Si, tengo la derivacion.",
+        "Me da igual la sede, la que antes tenga hueco.",
+        "Vale, resérvela."
+      ],
+      "expect": {
+        "booked": true,
+        "location_capability": "imaging",
+        "provider_name_contains": "David Chen"
+      }
+    },
+    {
+      "id": "soonest_beats_preferences",
+      "why": "Time is a constraint, not a final step. The agent must search across combinations.",
+      "script": [
+        "Hi, I need to see someone about my asthma as soon as possible.",
+        "It's Dana Ruiz, I'm an existing patient.",
+        "I really don't mind who I see, just the earliest slot.",
+        "I'll take it."
+      ],
+      "expect": {
+        "booked": true,
+        "specialty_in": [
+          "Pulmonology",
+          "Family Medicine",
+          "Internal Medicine",
+          "General"
+        ]
+      }
+    },
+    {
+      "id": "refine_after_rejecting_times",
+      "why": "Refining must be another tool call inside the node, not a backwards transition.",
+      "script": [
+        "Buenas, necesito una limpieza dental.",
+        "Soy Julia Pons, ya soy paciente.",
+        "Me da igual el dentista, lo que antes haya.",
+        "Uf, esas horas no me van bien.",
+        "Solo puedo los martes por la tarde.",
+        "Esa si, gracias."
+      ],
+      "expect": {
+        "booked": true,
+        "booked_on_weekday": "Tuesday"
+      }
+    },
+    {
+      "id": "near_duplicate_annual_visit",
+      "why": "Annual Physical and Annual Wellness Visit are semantically identical; only a question separates them.",
+      "script": [
+        "Hola, me toca la revision anual.",
+        "Soy Pere Soler, ya soy paciente.",
+        "La de siempre con mi medico de familia.",
+        "Perfecto."
+      ],
+      "expect": {
+        "booked": true,
+        "specialty_in": [
+          "Family Medicine",
+          "Internal Medicine",
+          "General"
+        ]
+      }
+    },
+    {
+      "id": "new_patient_blocked_from_followup",
+      "why": "A new patient cannot book a follow-up type; the agent must redirect rather than fail.",
+      "script": [
+        "Hi, I'd like to book a follow-up visit please.",
+        "Actually I've never been seen there before. I'm Tom Baker.",
+        "Okay, whatever you can do.",
+        "Sounds good."
+      ],
+      "expect": {
+        "new_patient_legal": true,
+        "appointment_type_not_in": [
+          "appt_004",
+          "appt_005",
+          "appt_006"
+        ]
+      }
+    },
+    {
+      "id": "referral_missing",
+      "why": "Referral-gated types must not be booked without one.",
+      "script": [
+        "Hola, quiero una consulta con el cardiologo.",
+        "Soy Nuria Salas, ya soy paciente.",
+        "No, no tengo ninguna derivacion de mi medico.",
+        "Ah, vale, entonces lo dejamos."
+      ],
+      "expect": {
+        "referral_legal": true
+      }
+    },
+    {
+      "id": "imaging_at_site_without_imaging",
+      "why": "The agent must explain the capability gate and offer the sites that do have it.",
+      "script": [
+        "Buenas, necesito una radiografia en la clinica de Sunset.",
+        "Soy Ivan Roca, ya soy paciente.",
+        "Ah, no sabia. Donde puedo entonces?",
+        "Vale, esa me sirve."
+      ],
+      "expect": {
+        "booked": true,
+        "location_capability": "imaging",
+        "location_name_not": "Sunset Community Clinic"
+      }
+    },
+    {
+      "id": "language_wish_does_not_block",
+      "why": "A language wish is a preference, not a policy. Ranking on it is fine; filtering on it turned a bookable appointment into 'no availability'.",
+      "script": [
+        "Hola, queria pedir cita de dermatologia con un medico que hable espanol.",
+        "Soy Lucia Mena, ya soy paciente.",
+        "Es una revision de un lunar.",
+        "Si, tengo la derivacion.",
+        "La primera que haya.",
+        "Perfecto, esa."
+      ],
+      "expect": {
+        "booked": true,
+        "specialty_in": [
+          "Dermatology"
+        ]
+      }
+    },
+    {
+      "id": "question_opening_hours",
+      "why": "Answering questions is a requirement, and it must not turn into a booking.",
+      "script": [
+        "Hola, solo queria saber a que hora abre la clinica de Mission Bay.",
+        "Y el telefono?",
+        "Nada mas, gracias."
+      ],
+      "expect": {
+        "booked": false,
+        "tools_used": [
+          "get_location_info"
+        ]
+      }
+    },
+    {
+      "id": "question_which_doctors",
+      "why": "Provider lookup by specialty, with no booking intent.",
+      "script": [
+        "Hi, which dermatologists do you have, and are they taking new patients?",
+        "Thanks, that's all."
+      ],
+      "expect": {
+        "booked": false,
+        "tools_used": [
+          "find_providers"
+        ]
+      }
+    },
+    {
+      "id": "unstaffed_specialty",
+      "why": "The clinic lists eye exams but nobody offers them. Promising an appointment is the worst outcome.",
+      "script": [
+        "Hola, queria una revision de la vista.",
+        "Soy Sara Vidal, ya soy paciente.",
+        "Ah, entiendo. Gracias."
+      ],
+      "expect": {
+        "booked": false
+      }
+    },
+    {
+      "id": "pediatric_routing",
+      "why": "'My daughter' is the signal that separates Pediatrics from Family Medicine.",
+      "script": [
+        "Hola, mi hija de seis anos lleva dos dias con fiebre.",
+        "Soy Marta Gil, y ella ya es paciente de la clinica.",
+        "Es para ella, tiene seis anos.",
+        "Lo antes posible por favor.",
+        "Esa me va bien, gracias."
+      ],
+      "expect": {
+        "booked": true,
+        "specialty_in": [
+          "Pediatrics",
+          "Family Medicine"
+        ]
+      }
+    },
+    {
+      "id": "fasting_bloodwork",
+      "why": "Lab work is capability-gated to sites with a lab.",
+      "script": [
+        "Buenos dias, me han mandado un analisis de sangre en ayunas.",
+        "Soy Hector Nunez, ya soy paciente.",
+        "El mas temprano que tengan.",
+        "Vale, gracias."
+      ],
+      "expect": {
+        "booked": true,
+        "location_capability": "lab",
+        "specialty_in": [
+          "Lab"
+        ]
+      }
+    }
+  ]
+}
