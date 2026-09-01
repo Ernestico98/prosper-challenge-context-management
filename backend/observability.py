@@ -98,6 +98,18 @@ def publish_node(name: str, *, reset: bool) -> None:
     BROADCASTER.publish({"type": "node", "name": name, "reset": reset})
 
 
+def publish_call_ended() -> None:
+    """Say when a call is over, so the builder can hand the caller a fresh client.
+
+    The prebuilt WebRTC client does not recover from a session the server ended:
+    pressing Connect a second time posts /start, gets a new session, and then
+    never sends an offer, so it hangs. The server is fine -- it issues sessions
+    happily -- and the bug is in a dependency we ship rather than own, so the
+    builder reloads the embedded client instead of leaving people to press F5.
+    """
+    BROADCASTER.publish({"type": "call_ended"})
+
+
 def _summarise(args: dict, result) -> str:
     """One line: what was asked, and what it cost in characters of context."""
     asked = ", ".join(f"{k}={v!r}" for k, v in args.items() if v is not None)

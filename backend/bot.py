@@ -40,7 +40,7 @@ from pipecat_flows import FlowManager
 import api  # noqa: F401  (registers the builder UI routes on the runner's app)
 from agent_builder import AgentBuilder
 from catalog import Catalog, bookable_specialties, build_index
-from observability import MetricsTap
+from observability import MetricsTap, publish_call_ended
 from tools.context import SchedulingContext
 
 # Load .env next to this file, so the bot runs the same from the repo root or backend/.
@@ -143,6 +143,11 @@ async def run_bot(
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
     await runner.add_workers(worker)
     await runner.run()
+
+    # The pipeline is done, by hang-up or by the caller leaving. Tell the
+    # builder so it can give the next call a fresh WebRTC client.
+    logger.info("Call finished")
+    publish_call_ended()
 
 
 async def bot(runner_args: RunnerArguments):

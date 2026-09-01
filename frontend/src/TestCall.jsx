@@ -11,6 +11,12 @@ import React, { useEffect, useRef, useState } from "react";
 export default function TestCall({ agent, live }) {
   const [events, setEvents] = useState([]);
   const [connected, setConnected] = useState(false);
+  // Remounting the iframe hands the next call a fresh WebRTC client. The
+  // prebuilt one does not survive a session the server ended: Connect posts
+  // /start, gets a new session id, and then never sends an offer. The server is
+  // healthy throughout, and the bug is in a dependency we ship rather than own,
+  // so this reloads it instead of leaving people to press F5.
+  const [clientKey, setClientKey] = useState(0);
   const socket = useRef(null);
 
   useEffect(() => {
@@ -22,7 +28,9 @@ export default function TestCall({ agent, live }) {
     ws.onclose = () => setConnected(false);
     ws.onmessage = (message) => {
       try {
-        setEvents((previous) => [...previous.slice(-200), JSON.parse(message.data)]);
+        const event = JSON.parse(message.data);
+        if (event.type === "call_ended") setClientKey((key) => key + 1);
+        setEvents((previous) => [...previous.slice(-200), event]);
       } catch {
         /* ignore malformed frames */
       }
@@ -52,13 +60,21 @@ export default function TestCall({ agent, live }) {
   return (
     <div className="call-layout">
       <div className="call-frame">
-        <iframe title="Pipecat test call" src="/client" allow="microphone" />
+        <iframe key={clientKey} title="Pipecat test call" src="/client" allow="microphone" />
       </div>
 
       <aside className="metrics">
         <h2>
           Context cost
           <span className={connected ? "dot live" : "dot"} title={connected ? "live" : "offline"} />
+          <div className="spacer" />
+          <button
+            className="ghost tiny"
+            onClick={() => setClientKey((key) => key + 1)}
+            title="Reload the embedded WebRTC client"
+          >
+            Reload client
+          </button>
         </h2>
         <p className="hint">
           Running <strong>{live?.name || "—"}</strong>. Every model call is measured;
@@ -102,6 +118,11 @@ export default function TestCall({ agent, live }) {
             .reverse()
             .map((event, index) => (
               <li key={index} className={event.type}>
+                {event.type === "call_ended" && (
+                  <>
+                    <code>call</code> ended — client reloaded for the next one
+                  </>
+                )}
                 {event.type === "tokens" && (
                   <>
                     <code>llm</code> {event.prompt_tokens?.toLocaleString()} in /{" "}
