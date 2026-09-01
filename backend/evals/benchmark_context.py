@@ -199,10 +199,11 @@ def main() -> int:
           "  the model ever has to read at once, against 82 appointment types in the\n"
           "  naive prompt. This is the accuracy argument, and caching does not help it.\n")
 
-    print("ESCAPE HATCH — injecting the specialty list instead of retrieving it")
+    print("THE OTHER CONFIGURATION — injecting the specialty list instead of retrieving it")
     print(f"  {specialties_injected:>7,} tokens fixed, but zero round trips.")
-    print("  Cheaper than retrieval while the list stays short; the crossover is\n"
-          "  roughly 50 specialties. See solution.md.\n")
+    print("  Both ship: give a node the find_specialties tool to retrieve, or write\n"
+          "  {specialties} in its prompt to inject. Injection is cheaper than a round\n"
+          "  trip while the list stays short; the crossover is roughly 50 specialties.\n")
 
     print("SCALING (same structure, larger catalog)")
     print(f"  {'catalog':>10} {'naive prompt':>14} {'one specialty slice':>21}")
