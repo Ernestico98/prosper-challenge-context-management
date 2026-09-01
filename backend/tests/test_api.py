@@ -166,6 +166,19 @@ class TestDelete(ApiTestCase):
         self.assertEqual(404, self.client.delete("/api/agents/ghost").status_code)
 
 
+class TestTheAppShellIsNeverCached(ApiTestCase):
+    """Asset filenames are content-hashed, so index.html decides which build
+    runs. A cached one silently serves the previous bundle: you rebuild the UI,
+    reload, and wonder why your change did nothing."""
+
+    def test_index_is_served_with_no_cache(self):
+        response = self.client.get("/builder")
+        if response.status_code == 503:
+            self.skipTest("UI not built (`make ui`)")
+        self.assertEqual(200, response.status_code)
+        self.assertIn("no-cache", response.headers.get("cache-control", ""))
+
+
 class TestShippedAgentsAreIntact(ApiTestCase):
     def test_both_shipped_agents_still_load_from_their_new_home(self):
         for name in ("scheduler_flow", "example_flow"):

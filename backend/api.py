@@ -322,7 +322,18 @@ if FRONTEND_DIST.exists():
     @app.get("/builder")
     @app.get("/builder/{path:path}")
     async def builder(path: str = ""):
-        return FileResponse(FRONTEND_DIST / "index.html")
+        """Serve the app shell, and never let a browser cache it.
+
+        Asset filenames are content-hashed, so index.html is the only thing that
+        says which build to load. Without an explicit header the browser caches
+        it heuristically and keeps loading the previous bundle: you rebuild the
+        UI, reload, and silently get the old app — which is a miserable thing to
+        debug, because everything looks correctly deployed from the server side.
+        """
+        return FileResponse(
+            FRONTEND_DIST / "index.html",
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
 else:  # pragma: no cover - developer convenience
 
