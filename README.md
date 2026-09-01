@@ -35,7 +35,7 @@ The builder, the catalog browser, the test call and the API are all served from
 
 | Target | What it does |
 | --- | --- |
-| `make test` | 146 unit tests. No API keys, no network, ~0.1s. |
+| `make test` | 154 unit tests. No API keys, no network, ~0.1s. |
 | `make test-ui` | 17 graph-operation tests (rename and delete cascades). Needs Node. |
 | `make benchmark` | Token cost against the naive full-catalog prompt. |
 | `make evals ARGS=--dry-run` | List the 16 accuracy scenarios; drop `ARGS` to run them (makes OpenAI calls). |
