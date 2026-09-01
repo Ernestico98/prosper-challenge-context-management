@@ -28,6 +28,10 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [newName, setNewName] = useState(null); // null = not creating
+  // A call in progress, reported by the pipeline. Lifted out of TestCall
+  // because the header shows it from every tab: with the call surviving a tab
+  // switch, it is otherwise possible to wander off and leave one running.
+  const [onCall, setOnCall] = useState(false);
 
   const live = agents.find((a) => a.active);
   const isLive = live?.id === agentId;
@@ -147,6 +151,7 @@ export default function App() {
               onClick={() => setTab(t.id)}
             >
               {t.label}
+              {t.id === "call" && onCall && <span className="dot live on-call" />}
             </button>
           ))}
         </nav>
@@ -200,10 +205,16 @@ export default function App() {
             onChange={update}
             onDeleteAgent={remove}
             isLive={isLive}
+            onCall={onCall}
           />
         )}
         {tab === "catalog" && <CatalogBrowser />}
-        {tab === "call" && <TestCall agent={agent} live={live} />}
+        {/* Hidden rather than unmounted: unmounting takes the iframe with it,
+            and the iframe is the WebRTC connection. Switching to the graph
+            mid-call used to hang up. */}
+        <div className="tab-panel" hidden={tab !== "call"}>
+          <TestCall agent={agent} live={live} onCallChange={setOnCall} />
+        </div>
         {tab === "graph" && !agent && <div className="empty">Loading agent…</div>}
       </main>
     </div>

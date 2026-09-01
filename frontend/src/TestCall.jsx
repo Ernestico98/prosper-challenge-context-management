@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from "react";
  * model call, which tools ran, and where the context was reset — live, next to
  * the conversation producing it.
  */
-export default function TestCall({ agent, live }) {
+export default function TestCall({ agent, live, onCallChange }) {
   const [events, setEvents] = useState([]);
   const [connected, setConnected] = useState(false);
   // Remounting the iframe hands the next call a fresh WebRTC client. The
@@ -29,13 +29,27 @@ export default function TestCall({ agent, live }) {
     ws.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data);
-        if (event.type === "call_ended") setClientKey((key) => key + 1);
+        if (event.type === "call_started") {
+          // Clear on start, not on end: clearing when the agent hangs up would
+          // wipe the trace at the exact moment someone wants to read it.
+          setEvents([event]);
+          onCallChange?.(true);
+          return;
+        }
+        if (event.type === "call_ended") {
+          setClientKey((key) => key + 1);
+          onCallChange?.(false);
+        }
         setEvents((previous) => [...previous.slice(-200), event]);
       } catch {
         /* ignore malformed frames */
       }
     };
-    return () => ws.close();
+    return () => {
+      onCallChange?.(false);
+      ws.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const totals = events.reduce(
@@ -118,6 +132,11 @@ export default function TestCall({ agent, live }) {
             .reverse()
             .map((event, index) => (
               <li key={index} className={event.type}>
+                {event.type === "call_started" && (
+                  <>
+                    <code>call</code> started — {event.agent}
+                  </>
+                )}
                 {event.type === "call_ended" && (
                   <>
                     <code>call</code> ended — client reloaded for the next one

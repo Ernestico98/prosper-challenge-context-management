@@ -89,7 +89,7 @@ function nodeLabel(node, isInitial, warnings) {
   );
 }
 
-export default function GraphEditor({ agent, tools, onChange, onDeleteAgent, isLive }) {
+export default function GraphEditor({ agent, tools, onChange, onDeleteAgent, isLive, onCall }) {
   // null means nothing is selected, which is when the inspector shows the
   // agent itself. Clicking empty canvas is a natural way to ask "what is this?".
   const [selected, setSelected] = useState(agent.initial_node);
@@ -245,6 +245,16 @@ export default function GraphEditor({ agent, tools, onChange, onDeleteAgent, isL
             Auto-arrange
           </button>
         </div>
+
+        {onCall && (
+          // Now that a call survives a tab switch, you can edit while one is
+          // running — and wonder why the agent still says the old thing. It is
+          // reading the version it connected with.
+          <div className="canvas-notice">
+            📞 A call is in progress. It is running the agent as it was when the
+            call started; edits apply on the next connection.
+          </div>
+        )}
 
         {graphWarnings.length > 0 && (
           // Shown, never blocking: you build a graph a piece at a time, and an

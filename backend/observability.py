@@ -98,6 +98,15 @@ def publish_node(name: str, *, reset: bool) -> None:
     BROADCASTER.publish({"type": "node", "name": name, "reset": reset})
 
 
+def publish_call_started(agent_name: str) -> None:
+    """Say when a call begins, so the panel can start its counters from zero.
+
+    Clearing on call_ended instead would wipe the trace the moment the agent
+    hangs up -- exactly when someone wants to read what just happened.
+    """
+    BROADCASTER.publish({"type": "call_started", "agent": agent_name})
+
+
 def publish_call_ended() -> None:
     """Say when a call is over, so the builder can hand the caller a fresh client.
 

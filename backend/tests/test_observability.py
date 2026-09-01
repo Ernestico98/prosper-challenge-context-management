@@ -12,7 +12,7 @@ import asyncio
 import json
 import unittest
 
-from observability import MetricsBroadcaster, publish_call_ended
+from observability import MetricsBroadcaster, publish_call_ended, publish_call_started
 
 
 class FakeSocket:
@@ -78,10 +78,11 @@ class TestBroadcaster(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], socket.sent)
 
 
-class TestCallEnded(unittest.IsolatedAsyncioTestCase):
-    async def test_the_builder_is_told_when_a_call_finishes(self):
-        """This is what triggers reloading the embedded client, so the next
-        Connect works instead of hanging."""
+class TestCallLifecycle(unittest.IsolatedAsyncioTestCase):
+    """The panel needs both ends of a call: the start to zero its counters, the
+    end to hand the next call a working client."""
+
+    async def publish(self, *calls):
         import observability
 
         broadcaster = MetricsBroadcaster()
@@ -91,12 +92,35 @@ class TestCallEnded(unittest.IsolatedAsyncioTestCase):
         original = observability.BROADCASTER
         observability.BROADCASTER = broadcaster
         try:
-            publish_call_ended()
-            await drain()
+            for call in calls:
+                call()
+                await drain()
         finally:
             observability.BROADCASTER = original
+        return socket.sent
 
-        self.assertEqual([{"type": "call_ended"}], socket.sent)
+    async def test_the_builder_is_told_when_a_call_finishes(self):
+        """This is what triggers reloading the embedded client, so the next
+        Connect works instead of hanging."""
+        self.assertEqual([{"type": "call_ended"}], await self.publish(publish_call_ended))
+
+    async def test_the_builder_is_told_when_a_call_starts(self):
+        """Counters reset here rather than on call_ended, so the trace survives
+        long enough to read after the agent hangs up."""
+        sent = await self.publish(lambda: publish_call_started("Prosper Clinic Scheduler"))
+        self.assertEqual(
+            [{"type": "call_started", "agent": "Prosper Clinic Scheduler"}], sent
+        )
+
+    async def test_a_second_call_is_announced_like_the_first(self):
+        sent = await self.publish(
+            lambda: publish_call_started("A"),
+            publish_call_ended,
+            lambda: publish_call_started("A"),
+        )
+        self.assertEqual(
+            ["call_started", "call_ended", "call_started"], [e["type"] for e in sent]
+        )
 
 
 if __name__ == "__main__":

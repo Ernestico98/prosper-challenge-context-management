@@ -40,7 +40,7 @@ from pipecat_flows import FlowManager
 import api  # noqa: F401  (registers the builder UI routes on the runner's app)
 from agent_builder import AgentBuilder
 from catalog import Catalog, bookable_specialties, build_index
-from observability import MetricsTap, publish_call_ended
+from observability import MetricsTap, publish_call_ended, publish_call_started
 from tools.context import SchedulingContext
 
 # Load .env next to this file, so the bot runs the same from the repo root or backend/.
@@ -133,6 +133,7 @@ async def run_bot(
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected — starting flow at initial node")
+        publish_call_started(config.name)
         await flow_manager.initialize(builder.build_initial_node())
 
     @transport.event_handler("on_client_disconnected")

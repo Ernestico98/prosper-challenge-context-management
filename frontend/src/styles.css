@@ -62,7 +62,11 @@ button:disabled { opacity: 0.5; cursor: default; }
 .status.ok { color: var(--ok); }
 .status.error { color: var(--danger); }
 
-main { flex: 1; overflow: hidden; }
+/* One flex child per tab, all but the visible one hidden. The call tab stays
+   mounted even when hidden, because unmounting it would take the iframe -- and
+   the WebRTC connection -- with it. */
+main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+main > * { flex: 1; min-height: 0; }
 .empty { padding: 40px; color: var(--muted); }
 
 /* ---- graph ---- */
@@ -250,6 +254,25 @@ input.invalid { border-color: var(--danger); }
 .node-flags .check { margin: 0 !important; }
 
 /* ---- warnings: shown, never blocking ---- */
+
+.tab-panel[hidden] { display: none; }
+
+.dot.on-call { display: inline-block; margin-left: 6px; vertical-align: middle; }
+
+.canvas-notice {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 5;
+  background: var(--panel);
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--ok);
+  font-size: 12px;
+  max-width: 48%;
+}
+.canvas-notice + .canvas-warnings { top: 46px; }
 
 .canvas-warnings {
   position: absolute;
