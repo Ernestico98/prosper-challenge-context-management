@@ -68,8 +68,14 @@ export default function TestCall({ agent, live, onCallChange }) {
   );
 
   // The comparison that makes the number mean something.
-  const naive = 5449;
-  const naiveEquivalent = naive * Math.max(totals.calls, 1);
+  // Tokens the catalog would add to *every* model call if it lived in the
+  // prompt (measured by evals/benchmark_context.py). The naive agent sends
+  // everything this one sends and the catalog on top, so the comparison is
+  // additive: dividing the catalog alone by our total would compare two
+  // different things and understate the difference.
+  const CATALOG_IN_PROMPT = 5449;
+  const catalogWouldAdd = CATALOG_IN_PROMPT * totals.calls;
+  const naiveTotal = totals.prompt + catalogWouldAdd;
 
   return (
     <div className="call-layout">
@@ -104,7 +110,7 @@ export default function TestCall({ agent, live, onCallChange }) {
         )}
 
         <div className="metric-grid">
-          <Metric value={totals.prompt.toLocaleString()} label="prompt tokens" />
+          <Metric value={totals.prompt.toLocaleString()} label="input tokens, all calls" />
           <Metric value={totals.peak.toLocaleString()} label="largest single prompt" />
           <Metric value={totals.calls} label="model calls" />
           <Metric value={totals.tools} label="tool calls" />
@@ -113,11 +119,13 @@ export default function TestCall({ agent, live, onCallChange }) {
         {totals.calls > 0 && (
           <div className="comparison">
             <div>
-              Naive equivalent (whole catalog re-sent every call):{" "}
-              <strong>{naiveEquivalent.toLocaleString()}</strong> tokens
+              With the catalog in the prompt, this same conversation would have sent{" "}
+              <strong>{naiveTotal.toLocaleString()}</strong> tokens: it adds{" "}
+              {CATALOG_IN_PROMPT.toLocaleString()} to each of the {totals.calls} model call
+              {totals.calls === 1 ? "" : "s"}.
             </div>
             <div className="ratio">
-              {(naiveEquivalent / Math.max(totals.prompt, 1)).toFixed(1)}× cheaper
+              {(naiveTotal / Math.max(totals.prompt, 1)).toFixed(1)}× cheaper
             </div>
           </div>
         )}

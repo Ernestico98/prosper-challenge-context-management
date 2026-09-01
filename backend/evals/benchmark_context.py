@@ -188,22 +188,28 @@ def main() -> int:
     kept = cumulative_catalog_tokens(sizes, reset_turn=None)
     recycled = cumulative_catalog_tokens(sizes, reset_turn=RESET_TURN)
 
-    print(f"PER CALL (a {TURNS_PER_CALL}-turn booking, counting re-sends)")
+    print(f"PER CALL — CATALOG TOKENS ONLY (a {TURNS_PER_CALL}-turn booking, counting re-sends)")
     print(f"  {naive_call:>7,} tokens  naive        ({naive:,} re-sent every turn)")
     print(f"  {kept:>7,} tokens  ours, append  (tool results linger in context)")
     print(f"  {recycled:>7,} tokens  ours, reset   (dropped once the type is settled)")
-    print(f"  {naive_call / max(recycled, 1):>7.0f}x  cheaper than naive")
-    print(f"  {100 * (kept - recycled) / max(kept, 1):>7.0f}%  of that saved by the reset alone\n")
+    print(f"  {naive_call / max(recycled, 1):>7.0f}x  cheaper than naive, on catalog tokens")
+    print(f"  {100 * (kept - recycled) / max(kept, 1):>7.0f}%  of that saved by the reset alone")
+    print("\n  This isolates the variable the design changes. A whole booking also carries\n"
+          "  the persona, node prompts, conversation and tool schemas, which both designs\n"
+          "  pay: measured end to end that is 12,454 tokens against 88,740, or 7.1x.\n")
 
     print(f"  Largest single tool result: {widest_specialty_slice(ctx):,} tokens — the most\n"
           "  the model ever has to read at once, against 82 appointment types in the\n"
           "  naive prompt. This is the accuracy argument, and caching does not help it.\n")
 
+    bookable = len(bookable_specialties(catalog))
     print("THE OTHER CONFIGURATION — injecting the specialty list instead of retrieving it")
-    print(f"  {specialties_injected:>7,} tokens fixed, but zero round trips.")
+    print(f"  {specialties_injected:>7,} tokens for {bookable} specialties "
+          f"({specialties_injected/bookable:.1f} each), and no round trip.")
     print("  Both ship: give a node the find_specialties tool to retrieve, or write\n"
-          "  {specialties} in its prompt to inject. Injection is cheaper than a round\n"
-          "  trip while the list stays short; the crossover is roughly 50 specialties.\n")
+          "  {specialties} in its prompt to inject. Injection grows with the catalog;\n"
+          "  retrieval costs a constant 86-token schema plus a round trip. They cross\n"
+          "  at roughly 49 specialties.\n")
 
     print("SCALING (same structure, larger catalog)")
     print(f"  {'catalog':>10} {'naive prompt':>14} {'one specialty slice':>21}")
