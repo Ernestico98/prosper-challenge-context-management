@@ -1,550 +1,470 @@
 # Solution — voice scheduling agent with a context-managed catalog
 
 **The catalog never enters the prompt.** It sits behind deterministic tools, the booking
-policies are enforced in code rather than in the prompt, and the conversation graph exposes
-only the tools each step needs — so the model chooses between three or four options instead
-of eighty-two.
+policies are enforced in code, and the conversation graph exposes only the tools each step
+needs — so the model chooses between three or four options instead of eighty-two.
 
 Measured on the provided catalog (8 locations, 50 providers, 82 appointment types):
 
-| | Result |
+| | |
 | --- | --- |
-| Input tokens per booking call | **40× fewer** than putting the catalog in the prompt |
+| Input tokens for one booking | **7× fewer** — 12,454 vs 88,740, measured end to end |
 | Largest catalog excerpt the model ever reads | **353 tokens**, against 82 appointment types |
-| Illegal bookings across 7 eval runs (~100 scenario executions) | **0** |
-| Deterministic tests | **154** Python + **17** JavaScript, no API keys, no network |
+| Illegal bookings across 7 eval runs (~100 scenarios) | **0** |
+| Deterministic tests | **154** Python + **17** JavaScript, offline |
 
 ```bash
-make install && make ui     # Python venv, then build the builder UI
+make install && make ui     # venv, then build the builder UI
 make run                    # http://localhost:7860/builder
-make test                   # 154 unit tests, offline, ~0.1s
-make test-ui                # 17 graph-operation tests
-make benchmark              # reproduces the token figures below
-make evals ARGS=--dry-run   # lists the 16 accuracy scenarios; drop ARGS to run them
+make test                   # 154 unit tests, no API keys, ~0.1s
+make benchmark              # reproduces the token figures
+make evals ARGS=--dry-run   # 16 accuracy scenarios; drop ARGS to run them
 ```
 
 ---
 
-## 1. What was built
+## 1. Requirements coverage
 
-| Requirement from the brief | Where it lives |
+| Asked for | Where |
 | --- | --- |
-| A UI to create an agent and place a test call | `frontend/` — create, wire and delete agents; edit nodes, edges, prompts and slots; choose which agent the call runs |
-| Creating appointments efficiently | `find_appointments` → `book_appointment` (`backend/tools/scheduling.py`) |
-| Offering available appointment slots | Offers carry provider, site and time together, ranked by what the caller asked for |
-| Matching request → type, location, provider | Retrieval (`catalog/index.py`) narrows; the constraint solver (`catalog/query.py`) decides what is legal |
-| Disambiguating similar options | Duplicate provider names return every candidate with an id to pick from; near-duplicate appointment types are separated by a question, never guessed |
-| Honouring preferences | Provider, location and soonest-available are carried as slots that survive a context reset |
-| Answering questions about locations, doctors, types | A read-only Q&A node with `find_providers`, `get_location_info`, `describe_appointment_type` |
+| UI to create an agent and place a test call | `frontend/` — create/wire/delete agents, edit nodes, edges, prompts, slots |
+| Create appointments efficiently | `find_appointments` → `book_appointment` |
+| Offer available slots | Offers carry provider + site + time together |
+| Match request → type, location, provider | Retrieval narrows (`catalog/index.py`); the solver decides legality (`catalog/query.py`) |
+| Disambiguate similar options | Duplicate names return every candidate with an id; near-duplicate types are separated by a question, never guessed |
+| Honour preferences | Provider, location and soonest-available carried as slots that survive a context reset |
+| Answer questions | Read-only Q&A node: `find_providers`, `get_location_info`, `describe_appointment_type` |
 
-Beyond the brief: a live context-cost panel that reads real token usage off the pipeline, and
-an offline eval harness that drives the compiled graph over text.
+Beyond the brief: a live context-cost panel reading real token usage off the pipeline, and an
+offline eval harness that drives the compiled graph over text.
 
 ---
 
-## 2. The problem, measured
+## 2. The problem
 
-Flattening the catalog into a system prompt costs **5,449 tokens**, re-sent on every turn:
-**65,388 tokens for a twelve-turn booking**.
+Flattening the catalog into a system prompt costs **5,449 tokens, re-sent every turn** —
+65,388 for a twelve-turn booking. Prompt caching recovers much of that in money terms. It does
+not fix the two things that matter:
 
-Cost is the lesser of the two problems, and prompt caching recovers much of it in money terms.
-Two things caching does not fix:
+- **Accuracy.** The catalog holds `New Patient Consultation` *and* `New Patient Visit`;
+  `Skin Cancer Screening` *and* `Full Body Skin Exam`; three duplicated provider names; six
+  cross-cutting policies that must hold at once. In a phone call the failure mode is an
+  appointment the clinic cannot honour, discovered when the patient arrives.
+- **Latency.** A model cannot emit its first token until it has read the whole prompt, so the
+  longer the prompt, the longer the silence before the agent speaks. Minor at this catalog size,
+  decisive at the sizes in the scaling table (§6).
 
-- **Accuracy.** The catalog contains `New Patient Consultation` *and* `New Patient Visit`;
-  `Skin Cancer Screening` *and* `Full Body Skin Exam`; three duplicated provider names; and six
-  cross-cutting booking policies that must hold simultaneously. Narrowing the choice to a
-  handful of rows before the model decides is the central bet of this design — a bet argued
-  from the structure of the data rather than from a head-to-head measurement, which §7 sets out
-  honestly. In a phone call the failure mode is an appointment the clinic cannot honour,
-  discovered when the patient arrives.
-- **Latency, at scale.** A model cannot emit its first token until it has read the entire
-  prompt, and that silence falls between the caller finishing their sentence and the agent
-  starting to speak. The effect is not visible at this catalog size: across 17 measured
-  turns spanning 42–1,434 prompt tokens, time-to-first-token correlated with prompt length at
-  only +0.46, dominated by network and queueing rather than by prompt size. It becomes a real
-  cost at the catalog sizes in the scaling table (§7), where the naive prompt reaches tens of
-  thousands of tokens. Treating it as a present-day argument at 5,449 tokens would overstate
-  the case.
-
-The design therefore optimises for **how much the model must read at the moment it decides**,
-and treats cost as a consequence rather than the target.
+The design optimises for **how much the model must read at the moment it decides**, and treats
+cost as a consequence.
 
 ---
 
 ## 3. Architecture
 
 ```
-                    catalog.json  (data)
-                          │
-   ┌──────────────────────┴───────────────────────┐
-   │  catalog/            no LLM. deterministic.  │
-   │    store.py      records + inverted indices  │
-   │    policies.py   the booking rules           │
-   │    query.py      find_bookable() — ONE solver│
-   │    index.py      hybrid retrieval            │
-   └──────────────────────┬───────────────────────┘
-                          │
-   ┌──────────────────────┴───────────────────────┐
-   │  tools/     budget context · speak · recover │
-   └──────────────────────┬───────────────────────┘
-                          │
-   ┌──────────────────────┴───────────────────────┐
-   │  agent_builder/   JSON → Pipecat Flows graph │
-   └──────────────────────┬───────────────────────┘
-                          │
-              bot.py — the voice pipeline
+catalog.json
+    │
+    ├─ catalog/     records, indices, policies, solver, specialty retrieval   ← no LLM
+    ├─ tools/       budget context · shape for speech · recover
+    ├─ agent_builder/   JSON → Pipecat Flows graph
+    └─ bot.py       the voice pipeline
 ```
 
-The division of labour is the organising idea:
-
-| | Responsibility | Rationale |
+| | Responsibility | Why there |
 | --- | --- | --- |
-| **LLM** | Language and world knowledge: mapping "my knee has been hurting for weeks" to Orthopedics, asking a question when two options are genuinely ambiguous | The model already has this; approximating it in code would be worse |
-| **Code** | Exactness: filtering, applying the policies, cross-checking provider × location × type | No hallucination surface in a `for` loop |
+| **LLM** | Language and world knowledge: symptom → specialty, asking when genuinely ambiguous | The model already has this |
+| **Code** | Exactness: filtering, the policies, provider × location × type | No hallucination surface in a `for` loop |
 
-A consequence worth stating: the correctness-critical half contains no LLM, so it is covered by
-ordinary unit tests that run in 100 milliseconds. Voice agents are otherwise difficult to test,
-and this moves most of the system into territory where testing is cheap.
+The correctness-critical half contains no LLM, so it is covered by unit tests that run in 100 ms.
+Voice agents are otherwise hard to test; this moves most of the system somewhere testing is cheap.
 
 ---
 
 ## 4. Design decisions
 
-### 4.1 One constraint solver; every tool is a projection of it
-
-The booking policies are cross-cutting: the same rule constrains searching for options, offering
-slots, and confirming a booking. Implemented per-tool, they would drift, and the drift would
-surface as an appointment the clinic cannot honour.
-
-There is therefore exactly one query path:
+### 4.1 One constraint solver — every tool is a projection of it
 
 ```python
 find_bookable(catalog, *, specialty=None, appointment_type_id=None,
               provider_id=None, location_id=None, patient=Patient()) -> list[BookableCombo]
 ```
 
-`None` means "not asked yet", which matches how a conversation accumulates constraints —
-incrementally and out of order ("with Dr. Garcia" … "near Mission" … "and it needs to be an
-MRI"). `list_appointment_types`, `find_appointments` and `book_appointment` are all projections
-of this one call, so no path can bypass a policy — including the booking step, which re-runs the
-solver to validate whatever the model selected.
+- **Policies are cross-cutting** — the same rule constrains searching, offering slots and
+  confirming. Implemented per-tool they would drift, and drift becomes an unhonourable booking.
+- **`None` means "not asked yet"**, which is how conversations accumulate constraints: out of
+  order, a bit at a time.
+- **No path bypasses a policy**, including the booking step, which re-runs the solver to validate
+  what the model selected.
+- *Rejected:* a handler with one method per use case — it explodes into
+  `get_providers_for_type_and_location_and_patient` variants that each re-derive the same rules.
 
-**Alternative rejected:** a catalog handler with one method per use case. It degenerates into a
-combinatorial explosion of methods (`get_providers_for_type_and_location_and_patient`) that each
-re-derive the same rules, which is precisely the drift the single path prevents.
+### 4.2 Narrow by specialty before appointment type
 
-### 4.2 Retrieval narrows; it never decides
+The funnel goes complaint → specialty → appointment type, rather than complaint → appointment
+type directly. **Specialty is the level where matching works.**
 
-Entering the hierarchy costs **zero prompt tokens**: `find_specialties(complaint)` takes the
-caller's own words rather than a specialty name. This also removes hallucinated specialties at
-this step, because the model relays text instead of selecting from a vocabulary it was never
-shown.
+Measured over ten complaints, asking whether the right specialty appears in the top three:
 
-**Why a vector database is not the decision-maker.** On this dataset it structurally cannot be.
-`New Patient Consultation` and `New Patient Visit` are semantically identical; an embedding
-places them at the same point. What separates them is a business rule, not a meaning.
-**Retrieval's job is to produce a short candidate list; disambiguation is a conversational act
-or a deterministic rule.** Any design that expects the vector store to select the right row is
-wrong for this data.
+| Searching | Hit rate |
+| --- | --- |
+| Specialties | **8/10** |
+| Appointment types directly | **4/10** |
 
-Three implementation choices carry most of the accuracy:
+- **Specialties are ~20 well-separated concepts** — Cardiology does not resemble Dermatology.
+  Appointment types are 82 overlapping names *inside* those specialties: `New Patient
+  Consultation` vs `New Patient Visit`, the MRI Brain/Spine/Knee family. Searching there means
+  searching at the level where nothing is separable.
+- **Most direct searches return nothing at all.** Type names are clinical terminology —
+  `Well-Child Visit`, `Mammogram` — and nobody phones asking for those.
+- **The one that does match is worse than nothing.** *"My knee has been hurting for weeks"*
+  retrieves `MRI - Knee` on the literal word "knee", when the caller probably needs an
+  orthopedic consultation. The only literal match is the most specific and most expensive option.
+- **Cost.** All 82 types is 3,292 tokens; one specialty is 161 median, 436 at its widest, and the
+  model chooses among three to eight options rather than eighty-two.
+- **A wrong turn is cheap.** A mistaken specialty costs ~50 tokens to discover and retry. A
+  mistaken appointment type is discovered when the patient arrives.
 
-1. **Enriched documents, not labels.** `"knee pain"` against the bare string `"Orthopedics"` is
-   a weak match, because the link is clinical inference rather than similarity. Each specialty's
-   document is its name, its appointment type names, and **452 curated bilingual symptom
-   aliases** (`backend/data/specialty_aliases.json`). This is the cheapest and highest-leverage
-   part of the retrieval design, and in production the alias vocabulary is something the clinic
-   owns and curates.
-2. **Hybrid, not pure vector.** A lexical channel is fused with the vector channel by reciprocal
-   rank fusion, which requires no score calibration between them. Embeddings handle rare exact
-   tokens poorly — `MRI`, `DEXA`, and the Spanish `mamografía` — while the lexical channel
-   matches them exactly. The bilingual example is deliberate: the alias vocabulary covers both
-   languages, and cross-lingual embedding similarity is exactly where a vector-only design is
-   weakest.
-3. **The LLM is the reranker.** The shortlist returns to the model with appointment-type counts
-   and it selects. No cross-encoder: the model is already in the loop, already paid for, and
-   already holds the clinical knowledge a general-purpose embedding model only approximates.
+So retrieval runs where it is reliable, and what similarity cannot separate is settled by asking.
 
-The lexical channel requires no network, so the whole system runs with no embeddings at all —
-`make test` and `make benchmark` both force that path. `make index` precomputes the vectors with
-one batched `text-embedding-3-small` call at 256 dimensions.
+### 4.3 Specialty retrieval narrows; it never decides
 
-**A trap worth documenting: partial vector coverage is worse than none.** Rank fusion rewards
-appearing in both channels, so a specialty missing from a stale cache ranks below worse matches
-that happen to be present — silently, and only in the configuration that ships. The index now
-refuses a cache that does not cover every document and falls back to lexical with a warning
-(`test_partial_vector_coverage_disables_the_channel`).
+`find_specialties(complaint)` takes the caller's own words, not a specialty name. **No catalog
+content sits in the prompt** — the cost is the tool's 86-token schema, which does not grow as the
+catalog does — and the model cannot hallucinate a specialty it was never shown.
 
-#### Both strategies ship, and switching between them is a configuration change
+**Why it returns three candidates rather than one.** Retrieval knows the clinic's vocabulary and
+lacks clinical judgement; the model is the exact reverse. Asked to name the specialty for ten
+complaints with no list and no tools, the model was conceptually right every time but produced a
+string the catalog actually contains only **6/10** — `Ortopedia` and `Psiquiatría` when the caller
+spoke Spanish, `Pathology` where this clinic says `Lab`, `Dentistry` where it says `Dental`.
+Retrieval fails the other way: a valid catalog string **9/10**, but the conceptually right one
+also only 6/10, since lexical matching depends on the words being in the alias file.
 
-Retrieval is not the only option, and it is not always the right one. Injecting the specialty
-list costs tokens but no round trip; retrieving costs a round trip but no tokens. Which wins
-depends on how long the list is, so **both are built and either can be selected per node from
-the builder UI, without touching code**:
+Neither is sufficient alone, so the design uses both: retrieval returns three candidates — **the
+right one is among them 8/10** — and the model picks. Retrieval supplies the vocabulary; the model
+supplies the judgement. That is what "narrows, never decides" means in practice.
 
-| | How it is configured | Prompt cost | Round trips |
-| --- | --- | --- | --- |
-| **Retrieval** (shipped default) | Give the node the `find_specialties` tool | 0 tokens | +1 LLM call |
-| **Injection** | Remove that tool; write `{specialties}` in the node prompt | 57 tokens | none |
+Three choices carry most of the accuracy:
 
-`{specialties}` renders the bookable specialty list at node-build time from the catalog itself,
-so it cannot drift from the data the way a hand-maintained list would. Both are two clicks apart
-in the node inspector: uncheck the tool, edit the prompt.
+- **Enriched documents, not labels.** `"knee pain"` against the bare string `"Orthopedics"` is a
+  weak match — the link is clinical inference. Each specialty's document is its name, its
+  appointment type names, and **452 curated bilingual symptom aliases**. Cheapest, highest-leverage
+  part of the design; in production the clinic owns that vocabulary.
+- **Hybrid, not pure vector.** A lexical channel is fused with the vector channel by reciprocal
+  rank fusion. Embeddings handle rare exact tokens poorly — `MRI`, `DEXA`, `mamografía` — and
+  lexical matches them exactly. The lexical channel needs no network, so the system runs with no
+  embeddings at all.
+- **The LLM is the reranker.** The shortlist returns to the model, which selects. No cross-encoder:
+  the model is already in the loop and already holds the clinical knowledge.
 
-**The trade-off.** Measured time-to-first-token in this system ranges from 0.5 s to 4 s per
-model call, so retrieval's extra round trip is a real pause on a phone call rather than a
-rounding error. Injection avoids it entirely, and at 57 tokens it is strictly cheaper than a
-round trip while the list stays short. **The crossover is around 50 specialties**, beyond which
-the injected list starts costing more than it saves and stops fitting comfortably in a prompt
-the model must read every turn.
+**A product argument that holds at any scale:** with retrieval, the mapping from lay language to
+the clinic's terms is a versioned file the customer edits. When a clinic says *"callers here ask
+for the sugar doctor — send them to Endocrinology"*, that is a line in `specialty_aliases.json`.
+Left to the model, it is a line in a prompt.
 
-The shipped agent retrieves, because that is what survives a catalog ten times this size — but
-on this catalog, at 18 bookable specialties, injection is the faster configuration and is a
-legitimate choice. Making that switchable rather than deciding it once is the point: the right
-answer depends on a customer's catalog, not on this one.
+### 4.4 Both narrowing strategies ship, selectable per node
 
-### 4.3 Data tools versus edges
+| | Configured by | Prompt cost | Scales with catalog? | Round trips |
+| --- | --- | --- | --- | --- |
+| **Retrieval** (default) | Give the node the `find_specialties` tool | 86 tokens of tool schema, plus 69 for its result once called | **No** — constant | +1 LLM call |
+| **Injection** | Remove the tool; write `{specialties}` in the prompt | 57 tokens today | **Yes** — ~3.2 tokens per specialty | none |
 
-The starter compiled every tool into a node transition. Pipecat Flows itself supports
-non-transitioning tools — a handler returning `next_node=None` — so the node schema gained a
-`tools` field alongside `edges`:
+- Both are **two clicks apart in the node inspector** — no code change.
+- `{specialties}` renders from the catalog at node-build time, so it cannot drift from the data.
+- Measured time-to-first-token is 0.5–4 s per model call, so retrieval's extra round trip is a
+  real pause, not a rounding error.
+- **The crossover is ~49 specialties**, where the injected list grows past retrieval's constant
+  155. Below it injection is cheaper *and* avoids the round trip, so on this catalog (18 bookable)
+  it wins on both axes. Above it the list keeps growing and retrieval does not. The shipped agent
+  retrieves because that is what survives a 10× catalog.
+- Making it switchable rather than deciding once is the point: the right answer depends on the
+  customer's catalog, not on this one.
+
+### 4.5 Data tools vs edges
 
 | | Moves the graph | Example |
 | --- | --- | --- |
-| **tool** | No — the result enters context and the step continues | `find_specialties`, `find_appointments` |
+| **tool** | No — result enters context, the step continues | `find_specialties`, `find_appointments` |
 | **edge** | Yes — a decision has closed | `select_appointment_type`, `finish` |
 
-This is what allows a node to search the catalog as many times as the conversation requires.
-"Not those times" has to be another tool call inside the same node; if it required a graph
-transition, the graph would need a node per possible outcome.
+The starter compiled every tool into a transition. Pipecat Flows supports non-transitioning
+tools, so nodes gained a `tools` field. This is what lets a node search repeatedly: *"not those
+times"* must be another tool call in the same node, or the graph would need a node per outcome.
 
-### 4.4 Context is recycled per node, not accumulated per call
+### 4.6 Context is recycled per node, not accumulated per call
 
-Because transitions now mark closed decisions, they are exactly where a context reset is safe.
-The `find_appointment` node declares `context_strategy: "reset"`: every search result the
-previous step produced is dropped, and the facts that must survive return through templated
-`task_messages` (`{appointment_type_name}`, `{full_name}`) for a couple of dozen tokens.
+Because transitions now mark closed decisions, they are exactly where a reset is safe.
+`find_appointment` declares `context_strategy: "reset"`.
 
-**This accounts for 61% of the total token saving** (§7), and it is the only mechanism in the
-design that stops context growing with call length.
+- **Worth 61% of the catalog-token saving** (§6) — the only mechanism that stops context growing
+  with call length.
+- Facts that must survive return through templated `task_messages` for a couple of dozen tokens.
+- **The cost: anything that must survive a reset has to be named as a slot.** `record_patient`
+  captures `language`; `select_appointment_type` captures `provider_preference` and
+  `location_preference` — exactly the preferences the brief asks to honour. A static test
+  enforces that every reset node interpolates something.
 
-**Its cost, discovered by running the evals rather than by reasoning about them.** The first
-smoke run passed every policy check and then switched to English halfway through a Spanish call:
-the reset had discarded the only evidence of what language the caller spoke. Later, a caller who
-named her doctor in her opening sentence was booked with someone else, because the name was
-stated before the reset and nothing carried it across.
-
-Twice is a pattern rather than an accident: **anything that must survive a reset has to be named
-as a slot, and whatever is forgotten disappears silently.** That is the real price of recycling
-context, and it is worth paying at 61% of the saving, but it has to be paid deliberately.
-`record_patient` captures `language`; `select_appointment_type` captures `provider_preference`
-and `location_preference` — exactly the preferences the brief asks to honour — and reset nodes
-restate all three. A static test enforces that every reset node interpolates *something*, which
-catches the shape of the mistake but not a specific missing slot; the evals close that gap.
-
-### 4.5 Offers are opaque ids, so an illegal booking cannot be composed
+### 4.7 Offers are opaque ids, so an illegal booking cannot be composed
 
 `find_appointments` returns fully-specified offers — provider **and** site **and** time, already
-policy-valid — and `book_appointment(option_id)` takes a single opaque id from the list just
-produced. The model selects; it never assembles. The hallucination surface at the booking step
-is therefore zero, and the solver re-validates regardless.
+policy-valid — and `book_appointment(option_id)` takes one opaque id from that list.
 
-This also collapses what would otherwise be two nodes. A caller who says "whatever is soonest, I
-don't mind who" is stating a *constraint*, not skipping a step, so slot search runs across all
-viable combinations rather than inside one already-chosen provider. Multi-location
-disambiguation — the sixth catalog policy — then resolves implicitly, because every offer names
-its own site.
+- The model selects; it never assembles. Hallucination surface at booking: zero.
+- Slot search runs across *all* viable combinations, so "whatever is soonest, I don't mind who"
+  is a constraint rather than a skipped step.
+- Multi-location disambiguation resolves implicitly, because every offer names its own site.
 
-### 4.6 Policies bind; preferences bend
+### 4.8 Policies bind; preferences bend
 
-A policy decides what is **legal**. A preference decides what is **desirable**. Conflating them
-is how a booking system starts refusing appointments the clinic would happily make.
-
-`catalog/policies.py` holds exactly the rules `catalog.json` states — five filtering rules plus
-one conversational obligation — and `Patient` carries only the facts those rules read
-(`is_new`, `has_referral`). Everything a caller might merely want lives in the tool layer:
-
-| | Example | When it cannot be satisfied |
+| | Example | When unsatisfiable |
 | --- | --- | --- |
 | **Policy** | this site has no imaging | Refuse, and explain why |
 | **Preference** | this doctor, this site, soonest | Widen the search, and say what was dropped |
 
-Three behaviours follow, each of which fixed a failure the evals surfaced:
+`catalog/policies.py` holds exactly the rules `catalog.json` states — five filtering rules plus
+one conversational obligation — and `Patient` carries only the facts those rules read. Everything
+a caller merely *wants* lives in the tool layer.
 
-- **A language wish ranks; it never filters.** Nothing in the catalog makes it illegal to book a
-  doctor who does not speak the caller's language, and the brief lists the preferences to honour
-  as *provider, location, soonest*. An earlier version enforced language as a policy, and it
-  cost a real booking: a caller speaking Spanish had that read as a demand for a
-  Spanish-speaking doctor, and a bookable echocardiogram returned "no availability" because the
-  cardiologist speaks only English.
+- **A language wish ranks; it never filters.** Nothing makes it illegal to book a doctor who does
+  not speak the caller's language, and the brief lists the preferences to honour as *provider,
+  location, soonest*.
 - **Unresolvable is not ambiguous.** Two doctors sharing a name is a question only the caller can
-  settle, so that stops and asks, returning each candidate with a `provider_id` to select. "My
-  usual family doctor" is not a name and no amount of asking will make it one, so it is dropped,
-  the search runs without it, and the result declares what was ignored.
-- **Relaxing cannot produce an illegal result**, by construction rather than by care. Dropping a
-  filter enlarges the candidate set; every combination returned is still checked against every
-  policy, and `book_appointment` re-validates besides. Two unit tests pin this: that the policy
-  list is exactly the catalog's, and that a widened search is still wholly legal.
+  settle, so that stops and asks with a `provider_id` per candidate. *"My usual family doctor"* is
+  not a name and never will be, so it is dropped, the search runs, and the result says so.
+- **Relaxing cannot produce an illegal result, by construction.** Dropping a filter enlarges the
+  candidate set; every combination is still checked against every policy. Two tests pin this.
 
-### 4.7 Considered and rejected: a specialty hierarchy
+### 4.9 Rejected: grouping specialties into categories
 
-Real medical taxonomies — SNOMED, the NUCC provider taxonomy — are DAGs rather than trees:
-"Sports Medicine" belongs under both Orthopedics and Primary Care, "Pediatric Cardiology" under
-both parents. A tree forces a wrong choice and then loses recall through the branch not taken.
+The funnel in §4.2 is two levels — specialty, then appointment type. A third level above it,
+grouping the 21 specialties into categories, was considered and rejected.
 
-With a flat enriched index, hierarchy also buys no recall at all: it would add a traversal hop
-and another opportunity to be wrong. It would earn its place for human browsing in the UI and
-for sharding the index at real scale, and if it is ever needed it should be **many-to-many tags,
-not a tree**, which dissolves the multi-parent problem by construction. At 21 specialties,
-building it would be over-engineering.
+Real medical taxonomies (SNOMED, NUCC) are DAGs, not trees — "Sports Medicine" belongs under both
+Orthopedics and Primary Care. A tree forces a wrong choice and loses recall through the branch not
+taken. With a flat enriched index it also buys no recall, only a hop and another chance to be
+wrong. If ever needed it should be **many-to-many tags, not a tree**.
 
 ---
 
-## 5. The scheduling agent
+## 5. The agent
 
 ```
-greeting ──▶ intake ──▶ identify_need ──▶ find_appointment ──▶ farewell (ends the call)
-   │                    ↑ tool loop        ↑ tool loop
-   └──(question)──▶ qa
+greeting ──▶ intake ──▶ identify_need ──▶ find_appointment ──▶ farewell (ends call)
+   │                     ↑ tool loop        ↑ tool loop, resets context
+   └──(question)──▶ qa ──┘
 ```
 
-Four booking nodes rather than five. The two middle nodes are **refinement loops**; a transition
-fires only when a decision has actually closed, which is exactly when a context reset is safe.
+Four booking nodes. The two middle ones are **refinement loops** — they call tools repeatedly
+without moving — and a transition fires only when a decision has closed.
 
-| Node | Does | Notes |
+| Node | Tools available | Collects | Notes |
+| --- | --- | --- | --- |
+| `greeting` | — | — | Routes to booking or Q&A |
+| `intake` | — | `full_name`, `is_new_patient`, `language` | Before any catalog lookup: new-patient status prunes the search |
+| `identify_need` | `find_specialties`, `list_appointment_types`, `describe_appointment_type` | `appointment_type_id`, `has_referral`, `provider_preference`, `location_preference` | Loops until the type is settled; asks about a referral only if the type needs one |
+| `find_appointment` | `find_appointments`, `find_providers`, `get_location_info`, `book_appointment` | — | **Resets context on entry**; re-called freely as the caller refines |
+| `farewell` | — | — | Reads the booking back, ends the call |
+| `qa` | the five read-only tools | — | Reachable from the greeting |
+
+### What each tool does
+
+| Tool | Returns | Schema cost |
 | --- | --- | --- |
-| `greeting` | Routes to booking or Q&A | |
-| `intake` | Name, new-or-returning, language | Collected before any catalog lookup, because new-patient status prunes the search space |
-| `identify_need` | `find_specialties` → `list_appointment_types` → optionally `describe_appointment_type` | Loops until the type is settled; asks about a referral only if the chosen type requires one |
-| `find_appointment` | `find_appointments`, re-called freely as the caller refines | Declares `context_strategy: reset` |
-| `farewell` | Reads the booking back and ends the call | |
-| `qa` | Read-only catalog tools | Reachable from the greeting |
+| `find_specialties(complaint)` | Ranked specialties for the caller's own words, with how many types each has. Flags any not currently offered | 86 |
+| `list_appointment_types(specialty)` | Bookable types in that specialty, each with duration, referral and new-patient flags. Unknown specialty returns `did_you_mean` | 57 |
+| `describe_appointment_type(id)` | Duration, requirements, how many sites and providers can do it | 65 |
+| `find_appointments(type, …prefs)` | Fully-specified offers — provider **and** site **and** time, already policy-valid — ranked by stated preference, with anything unmatchable declared | **325** |
+| `book_appointment(option_id)` | Confirms one offer by opaque id, re-validated through the solver | 80 |
+| `find_providers(name/specialty/site/language)` | Doctors, their sites, languages, new-patient status. Duplicate names return every candidate with a `provider_id` | 129 |
+| `get_location_info(name?)` | Address, phone, hours, on-site services | 62 |
+| | **all seven** | **804** |
 
-Seven tools are exposed in total: `find_specialties`, `list_appointment_types`,
-`describe_appointment_type`, `find_appointments`, `book_appointment`, `find_providers`,
-`get_location_info`.
-
-**Self-correction.** A tool must never hand the agent an empty result it cannot act on. A
-hallucinated specialty returns `did_you_mean` resolved through the retrieval index rather than by
-edit distance — character similarity places "Traumatology" next to *Dermatology*, whereas the lay
-vocabulary places it next to *Orthopedics*, which is the useful answer. An impossible request
-returns the reason and the nearest alternatives: asking for an X-ray at a site without imaging
-produces "needs a site with imaging" plus the sites that have it.
+Every tool that can fail returns something the agent can act on: suggestions for an unknown
+specialty, candidates for an ambiguous name, the reason and the nearest alternatives for an
+impossible request. Never an empty list.
 
 ---
 
-## 6. Phase 1 — the builder
-
-The UI creates and deletes agents, adds, renames and deletes nodes, marks a node terminal or as
-the entry point, draws edges by dragging between nodes, and edits the slots an edge collects. It
-also browses the catalog and places a test call.
-
-Decisions worth noting:
-
-- **Node names are identity.** Edges target them by name and `initial_node` names one, so
-  renaming rewrites every edge that pointed at the old name and deleting takes inbound edges with
-  it — in a single state update, because the API compiles before it writes and would reject a
-  half-updated graph. These operations live in `frontend/src/graphOps.js` as pure functions and
-  are tested directly (17 tests); clicking through a browser proves a control is wired, whereas
-  these prove the graph survives the edit.
-- **Two classes of invalid, treated differently.** Duplicate node names, edges to missing nodes
-  and unknown tools cannot compile, so the API rejects them with 422 and nothing reaches disk.
-  Dead ends, unreachable nodes and a graph that never hangs up are shown as warnings and never
-  block saving, because a graph is built a piece at a time and an editor that refuses to save
-  half-built work is unusable.
-- **Slots are not plumbing.** The properties an edge collects are the arguments the model fills
-  in, and they land in `flow_manager.state` — which makes them the only things that survive a
-  context reset. `provider_preference` exists because a preference stated before a reset was
-  otherwise lost (§4.4).
-- **Layout is derived, not stored.** A generated agent should not have to invent coordinates, so
-  an unarranged graph opens readable via breadth-first placement. Once a node is dragged, that
-  position is authoritative and saved with the agent.
-- **A live context-cost panel.** Phase 2's work is otherwise invisible — a cheap, accurate agent
-  and an expensive, confused one sound identical. The panel reads real token usage from the
-  pipeline's `MetricsFrame`, so nothing in it is estimated, and traces every tool call and node
-  transition as they happen.
-
-Agents are files in `backend/data/agents/`. Saving is a write and deploying is a reconnect,
-because the runner re-reads the agent JSON on every connection.
-
----
-
-## 7. Evidence
+## 6. Evidence
 
 ### Cost
 
-`make benchmark`, exact counts via tiktoken:
+One booking, measured end to end: **14 model calls, 12,454 input tokens.** That is the figure
+the live panel shows during a demo. With the catalog in the prompt, the same conversation would
+have sent **88,740**, because the catalog is re-sent on every one of those 14 calls.
 
-| Strategy | Tokens for a 12-turn booking |
+| One booking | Total input tokens |
 | --- | --- |
-| Naive — whole catalog in the system prompt | **65,388** (5,449 re-sent every turn) |
-| This design, `append` — tool results linger | 4,185 |
-| This design, `reset` — dropped once the type is settled | **1,653** |
+| Catalog in the prompt | 88,740 |
+| Catalog behind tools | **12,454** |
+| | **7.1× fewer** |
 
-**40× cheaper, and 61% of that saving comes from the context reset alone.**
+What remains is mostly not catalog: the persona, the node's prompt, the conversation, and the
+tool schemas — which the function-calling protocol re-sends on every call and which are the
+largest single component (688 tokens on `find_appointment`).
 
-These figures count re-sends. A tool result added on turn 4 is part of the prompt on every
-subsequent turn, so "paid once" would be inaccurate; the reset is what makes it nearly true.
+**Isolating the variable the design changes** — catalog-derived tokens alone — `make benchmark`
+reports **65,388 → 1,653 for a 12-turn booking, 40× fewer, 61% of it from the context reset.**
+That is the mechanism; the 7.1× above is what the mechanism is worth on a real call.
 
-The figure that matters for accuracy is different: **353 tokens** is the largest single tool
-result — the most the model ever reads at once, against 82 appointment types in the naive
-prompt. Prompt caching does nothing for that.
+The figure that matters for accuracy is different again: **353 tokens** is the largest single
+tool result — the most catalog the model ever reads at once, against 82 appointment types.
+Caching does nothing for that.
 
 ### Scaling
 
-| Catalog size | Naive prompt | What the model reads |
+| Catalog | Naive prompt | What the model reads |
 | --- | --- | --- |
 | 1× | 5,449 | 353 |
 | 10× | 54,490 | 353 |
 | 50× | 272,450 | 353 |
 
-The naive prompt scales with the catalog. The slice the model reads does not: a clinic ten times
+The naive prompt scales with the catalog; the slice the model reads does not. A clinic ten times
 this size has more specialties, not ten times more MRI variants.
 
-### Accuracy
+### Correctness
 
-- **154 Python unit tests** (`make test`) covering every policy, the solver, retrieval, the
-  builder API and static checks on the shipped agent graph — no API keys, no network, ~100 ms.
-- **17 JavaScript tests** (`make test-ui`) covering the graph edits where a mistake is silent:
-  rename and delete cascades, name uniqueness, and the warning rules.
-- **16 scripted scenarios** (`make evals`) that drive the *same compiled graph* the voice
-  pipeline runs, over text, asserting on the outcome — what was booked and whether it was legal
-  — rather than on wording. They cover the traps: a knee MRI needing both a referral and an
-  imaging site; a provider practising at four sites who offers a gated service at two; the
-  `Dr. Maria Garcia` ambiguity; new-patient restrictions; near-duplicate annual visits; a caller
-  who rejects the first times offered; and a specialty the clinic advertises but cannot staff.
+- **154 Python tests** — every policy, the solver, retrieval, the builder API, static checks on
+  the shipped graph. No API keys, no network, ~100 ms.
+- **17 JavaScript tests** — the graph edits where a mistake is silent: rename and delete cascades,
+  name uniqueness, warning rules.
+- **16 scripted scenarios** driving the *same compiled graph* the voice pipeline runs, over text,
+  asserting on the outcome — what was booked and whether it was legal — not on wording. They cover
+  the traps: a knee MRI needing both a referral and an imaging site; a provider at four sites
+  offering a gated service at two; duplicate provider names; new-patient restrictions;
+  near-duplicate annual visits; a caller who rejects the first times offered; a specialty the
+  clinic advertises but cannot staff.
 
-**Results.** Seven full runs, in order: **11, 7, 12, 11, 13, 16, 16 of 16.** Each step followed
-from fixing a defect the previous run exposed; the 7 was a regression introduced and then caught
-(the stale-vector trap in §4.2). The last two runs are the same code twice.
+**Across 7 full runs — roughly a hundred scenario executions — zero illegal bookings.** No provider
+booked outside their sites, no capability-gated service where the capability is missing, no new
+patient on a restricted type, no referral-gated type without one. That is the claim the
+architecture makes, re-verified against the catalog independently of the agent.
 
-Two clean runs are two samples rather than a stable accuracy figure, and scenarios do flip
-between runs even at `temperature=0`, since the provider offers no determinism guarantee without
-a seed. The trend is meaningful because every step traces to a specific fix; the final digit is
-not.
-
-**The figure that does hold: across all seven runs — roughly a hundred scenario executions —
-zero illegal bookings.** No provider booked outside their sites, no capability-gated service at
-a site lacking it, no new patient on a restricted type, no referral-gated type without one. That
-is the claim the architecture makes; it is re-verified against the catalog independently of the
-agent in `_policy_failures`, and it held on every run, including the run that scored 7.
-Completion accuracy moved substantially; legality never moved at all. That separation is the
-design behaving as intended.
-
-**What the evals found that 154 unit tests could not.** This is the argument for building the
-harness, so it is worth being concrete:
-
-1. *A misroute worse than a dead end.* Unstaffed specialties were excluded from the retrieval
-   index, which looked safer since nothing there is bookable. In practice the query then matched
-   the next-closest specialty: a caller asking for an eye exam was booked a general follow-up,
-   and would have discovered it in the waiting room. They are now indexed and flagged
-   `not_currently_offered`.
-2. *Preferences dying at a context reset.* Twice — the conversation language, then a named
-   doctor. Both are now slots (§4.4).
-3. *A tool advertising a name it would not accept.* Ambiguous-provider candidates were shown as
-   "Dr. Maria Garcia, MD" while the resolver matched only "Dr. Maria Garcia", so the model could
-   not disambiguate using the words it had just been handed. Candidates now carry `provider_id`
-   — the same pick-from-a-list-we-produced mechanism that makes booking hallucination-free.
-4. *A dead end the agent circled.* "My usual family doctor" is not a name; returning
-   `unknown_provider` had the agent ask for it three times in succession. Unresolvable
-   preferences are now dropped and declared (§4.6).
-5. *An invented requirement, and the regression it caused.* Language enforced as a policy (§4.6).
-
-None of these are visible without running the graph end to end. Unit tests cover what the domain
-must do; only a conversation reveals what the agent does with it.
-
-### What is not measured
-
-Cost is measured for both strategies; accuracy is measured only for this one. The claim that the
-naive approach is *less accurate* — that a model choosing from 82 near-identical rows makes
-mistakes a model choosing from four does not — is reasoned, not demonstrated. Demonstrating it
-would require a second arm over the same scenarios and the same assertions, with the whole
-catalog in the prompt and a `book(type_id, provider_id, location_id)` tool the model composes
-itself. That last detail is what would make the comparison fair: giving the naive arm the same
-opaque-offer booking tool would hand it the very property under test. The scenarios and the
-legality assertions already support such an arm; it is simply not built.
+*Not measured:* that the naive approach is **less accurate**. That claim is argued from the
+structure of the data, not demonstrated. Doing so would need a second arm over the same scenarios
+with the catalog in the prompt and a `book(type_id, provider_id, location_id)` tool the model
+composes itself — the scenarios and assertions already support it; the arm is not built.
 
 ---
 
-## 8. What the catalog turned out to contain
+## 7. Two things the catalog turned out to contain
 
-Two findings changed the implementation:
-
-- **Eight appointment types have no provider at all** — the whole of Ophthalmology, Physical
-  Therapy and Urology. The clinic advertises services nobody is staffed for. Routing a caller
-  there is a dead end discovered at the end of the call, so the booking funnel is built from
-  `bookable_specialties()` (18 of 21) while retrieval still finds them and marks them
-  unavailable. The catalog browser surfaces them rather than hiding them, because it is a data
-  problem someone should fix.
-- **Providers offer appointment types outside their own specialty** — internists book `General`
-  and `Family Medicine` types. Specialty filtering must therefore be on the **appointment type's**
-  specialty, never the provider's; the other way loses most of primary care, which is the most
-  common case.
+- **Eight appointment types have no provider** — all of Ophthalmology, Physical Therapy and
+  Urology. Routing a caller there is a dead end found at the end of the call, so the booking funnel
+  is built from bookable specialties (18 of 21) while retrieval still finds them and marks them
+  unavailable. Hiding them from retrieval is worse: the query then matches the next-closest
+  specialty and books something wrong.
+- **Providers offer types outside their own specialty** — internists book `General` and
+  `Family Medicine` types. Specialty filtering must therefore be on the **appointment type's**
+  specialty, never the provider's, or most of primary care disappears.
 
 ---
 
-## 9. Scope
+## 8. Scope
 
-**Built:** the domain layer and its tests, hybrid retrieval, mocked availability, the schema
-extension (data tools, context strategy, prompt templating), seven tools, the scheduling agent,
-the eval harness and cost benchmark, the builder UI, and the live cost panel.
-
-**Mocked:** availability. Deterministic, seeded from `(provider, location, date)` so demos
-replay identically. It models one thing deliberately: a provider practising at several sites is
-at only one of them per day, which is what makes "book with Dr. Chen" genuinely require a
-location rather than as a formality.
+**Mocked:** availability. Deterministic, seeded from `(provider, location, date)` so demos replay
+identically. It models one thing deliberately — a provider practising at several sites is at only
+one per day, which makes "book with Dr. Chen" genuinely require a location.
 
 **Deliberately not built:**
 
-| Omitted | Reasoning |
+| Omitted | Why |
 | --- | --- |
-| Reschedule and cancel | No new context-management surface, considerable state. The interesting problem is navigating the catalog |
-| A specialty hierarchy | Reasoned about and rejected (§4.7) |
-| Nested JSON-schema editing for edge slots | A flat name/type/description/required table covers every slot the shipped agent uses; the JSON stays hand-editable for anything exotic |
-| Auth, multi-tenancy, a database | Not what the challenge is testing |
+| Reschedule and cancel | No new context-management surface, considerable state |
+| A specialty hierarchy | Reasoned about and rejected (§4.9) |
+| Nested JSON-schema editing for slots | A flat table covers every slot the agent uses; JSON stays hand-editable |
+| Auth, multi-tenancy, a database | Not what the challenge tests |
 
 ---
 
-## 10. Limits, and what changes at scale
+## 9. Where the remaining tokens are, and how to cut them
 
-- **Specialties stop fitting in one retrieval pass** somewhere in the low thousands. The fix sits
-  behind the `SpecialtyIndex` Protocol: replace `InMemorySpecialtyIndex` with a pgvector or
-  Qdrant implementation, fetch top-N from the database, rerank in code. **No tool handler
-  changes** — that substitution is the purpose of the seam.
-- **The alias vocabulary is hand-curated.** It is the highest-leverage data in the system and it
-  does not scale by hand past a few hundred specialties. A production system would generate a
-  first pass from historical call transcripts and have the clinic curate it.
-- **`find_appointments` probes availability for up to 25 combinations.** Against a real calendar
-  API that is 25 network calls; it would need a batch availability endpoint or a cached free/busy
-  index.
-- **No concurrency control.** Two callers can be offered the same slot, because nothing is held.
-  A real system needs a soft hold at offer time.
-- **The embedded WebRTC client does not recover from a session the server ended.** That is a
-  dependency rather than code in this repo; the builder works around it by remounting the client
-  when a call finishes.
+None of the following is implemented. They are listed because the measurements above point at
+them, and because the cheapest wins are no longer in the catalog — they are in what surrounds it.
+
+A booking sends 12,454 input tokens across 14 model calls. Only ~1,653 of those are catalog. The
+rest is persona, node prompts, conversation, and **tool schemas — 804 tokens for all seven, of
+which `find_appointments` alone is 325**, re-sent on every call in its node.
+
+**1. Trim the widest schema.** `find_appointments` costs 325 tokens because it carries eight
+optional preference parameters (provider, location, weekdays, time of day, language, ranking).
+Splitting the rare ones into a second tool, or accepting a single free-text `preferences` string
+the tool parses, would cut most of it. Cheapest change on this list, and it only touches one
+tool definition.
+
+**2. Retrieve tools instead of declaring them all.** The node graph already scopes tools per
+step, which is the coarse version of this. The finer version is to expose a small core set plus
+a `load_tools(intent)` call that returns the schemas actually needed — schema retrieval, the same
+idea as catalog retrieval applied one level up. Worth stating precisely because it sounds more
+abstract than it is: the measurement says schemas are the largest single component of a prompt,
+so this is where the next order of magnitude lives.
+*Cost:* an extra round trip, exactly the trade-off weighed in §4.4, and a model that cannot see
+a tool cannot call it — so the routing has to be right or the agent loses a capability silently.
+
+**3. Reset context in more nodes.** Only `find_appointment` resets today. Entering
+`identify_need` could also reset, dropping the greeting and intake exchange — worth roughly 600
+tokens on every subsequent call in that node, from the measured 1,439-token prompt against 835
+of fixed content.
+*Cost:* everything the later nodes need must become an explicit slot, and §4.6 records what
+happens when one is forgotten — the failure is silent. Each new reset point is a new set of
+slots to get right, so this trades tokens for a class of bug that unit tests do not catch.
+
+**4. Summarise instead of carrying the transcript.** Pipecat supports on-demand summarisation.
+For long calls the conversation eventually outweighs everything else; a summary at each node
+boundary bounds it.
+*Cost:* an extra LLM call per boundary, and summaries lose detail the agent may need — which is
+the same slot problem as (3), with less control over what survives.
+
+**5. Order the prompt for prefix caching.** Persona and tool schemas are identical across every
+call within a node. Keeping them strictly first, ahead of anything that varies, maximises what a
+provider's prefix cache can reuse. This does not reduce tokens sent; it reduces what they cost.
+
+**6. Use a smaller model for narrow steps.** `intake` collects a name and a yes/no with no tools
+and a 54-token prompt. A cheaper model would serve it, with the frontier model reserved for
+`identify_need` and `find_appointment`, where the judgement actually is.
+*Cost:* two models to evaluate rather than one, and a quality cliff that only shows up in
+conversation.
+
+**What is deliberately not on this list:** compressing the tool *results*. They are already
+capped at three options and hold 353 tokens at their widest — the accuracy argument in §6 depends
+on the model seeing those options clearly, and squeezing them trades the thing this design is
+for against a rounding error.
 
 ---
 
-## 11. Demo walkthrough
+## 10. Limits at scale
+
+- **Specialties stop fitting one retrieval pass** in the low thousands. The fix sits behind the
+  `SpecialtyIndex` Protocol: swap `InMemorySpecialtyIndex` for pgvector or Qdrant, fetch top-N from
+  the database, rerank in code. **No tool handler changes** — that is the purpose of the seam.
+- **The alias vocabulary is hand-curated** and does not scale past a few hundred specialties by
+  hand. Production would generate a first pass from call transcripts and have the clinic curate it.
+- **`find_appointments` probes up to 25 combinations** — against a real calendar that is 25 network
+  calls, needing a batch availability endpoint or a cached free/busy index.
+- **No concurrency control.** Two callers can be offered the same slot; a real system needs a soft
+  hold at offer time.
+
+---
+
+## 11. Demo
 
 ```bash
-make install && make ui && make run     # then open http://localhost:7860/builder
+make install && make ui && make run     # http://localhost:7860/builder
 ```
 
-1. **Build an agent from nothing.** New agent → rename a node → add a second → connect them by
-   dragging → give the edge a slot → mark the second node terminal → save → *Set live*. Invalid
-   graphs are refused at save time; incomplete ones are only warned about.
-2. **Browse the catalog** to show the scale and the messiness the agent navigates — including the
-   eight advertised-but-unbookable types the browser flags.
-3. **Place a call** against the scheduling agent: *"my knee has been hurting for weeks and my
-   orthopedist sent me for an MRI."* It narrows to Orthopedics and Radiology, asks about the
-   referral, offers only the three imaging-capable sites, and books.
-4. **Repeat the opening line in Spanish** to show the same path working end to end in another
-   language, and the conversation language surviving the context reset as a slot (§4.4).
-5. **Watch the context panel** while it happens: prompt tokens per model call, every tool call,
-   and the node transition where the context is reset — next to the conversation producing it.
-6. **Switch to the graph mid-call** — the call keeps running — and show that the largest thing
-   the model ever read was a few hundred tokens.
-7. **Swap retrieval for injection live** (§4.2): uncheck `find_specialties` on `identify_need`,
-   put `{specialties}` in its prompt, save, reconnect. The same agent now trades 57 prompt
-   tokens for one fewer round trip, and the panel shows the difference on the next call.
+1. **Build an agent from nothing** — new agent → rename a node → add a second → connect by
+   dragging → give the edge a slot → mark it terminal → save → *Set live*. Invalid graphs are
+   refused at save time; incomplete ones only warned about.
+2. **Browse the catalog** — the scale and the messiness, including the eight advertised-but-
+   unbookable types.
+3. **Place a call:** *"my knee has been hurting for weeks and my orthopedist sent me for an MRI."*
+   It narrows to Orthopedics and Radiology, asks about the referral, offers only the three
+   imaging-capable sites, and books.
+4. **Repeat the opening in Spanish** — same path, and the conversation language survives the
+   context reset as a slot.
+5. **Watch the context panel** — prompt tokens per model call, every tool call, and the node
+   transition where context is reset, next to the conversation producing it.
+6. **Switch to the graph mid-call** — the call keeps running, and the largest thing the model read
+   was a few hundred tokens.
+7. **Swap retrieval for injection live** (§4.4) — uncheck the tool, add `{specialties}`, save,
+   reconnect. The same agent now trades 57 prompt tokens for one fewer round trip.
