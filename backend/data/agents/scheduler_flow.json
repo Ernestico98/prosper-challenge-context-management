@@ -24,14 +24,18 @@
           "description": "The caller is asking about the clinic, its sites, its doctors or its services rather than booking.",
           "target": "qa"
         }
-      ]
+      ],
+      "position": {
+        "x": 60,
+        "y": 40
+      }
     },
     {
       "name": "intake",
       "task_messages": [
         {
           "role": "developer",
-          "content": "Collect two things, one question at a time: the caller's full name, and whether they have been seen at this clinic before. Then call record_patient, also recording which language they are speaking. Do not ask about symptoms yet."
+          "content": "Collect two things, one question at a time: the caller's full name, and whether they have been seen at this clinic before. Then call record_patient, also recording which language they are speaking by inferring it from the conversation. Do not ask about symptoms yet."
         }
       ],
       "edges": [
@@ -59,7 +63,11 @@
             "language"
           ]
         }
-      ]
+      ],
+      "position": {
+        "x": 360,
+        "y": 39
+      }
     },
     {
       "name": "identify_need",
@@ -70,9 +78,9 @@
         }
       ],
       "tools": [
-        "find_specialties",
         "list_appointment_types",
-        "describe_appointment_type"
+        "describe_appointment_type",
+        "find_specialties"
       ],
       "edges": [
         {
@@ -106,7 +114,11 @@
             "appointment_type_name"
           ]
         }
-      ]
+      ],
+      "position": {
+        "x": 659,
+        "y": 39
+      }
     },
     {
       "name": "find_appointment",
@@ -129,7 +141,11 @@
           "description": "The appointment has been booked successfully.",
           "target": "farewell"
         }
-      ]
+      ],
+      "position": {
+        "x": 960,
+        "y": 39
+      }
     },
     {
       "name": "farewell",
@@ -167,7 +183,11 @@
           "description": "The caller has no more questions and wants to end the call.",
           "target": "farewell"
         }
-      ]
+      ],
+      "position": {
+        "x": 360,
+        "y": 230
+      }
     }
   ]
 }
